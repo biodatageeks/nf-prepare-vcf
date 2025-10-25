@@ -9,11 +9,12 @@ process BCFTOOLS_ANNOTATE {
 
     input:
     tuple val(meta), path(input), path(index), path(annotations), path(annotations_index), path(columns), path(header_lines), path(rename_chrs)
+    val(out_name_part)
 
     output:
-    tuple val(meta), path("*.{vcf,vcf.gz,bcf,bcf.gz}"), emit: vcf
-    tuple val(meta), path("*.tbi"),                     emit: tbi, optional: true
-    tuple val(meta), path("*.csi"),                     emit: csi, optional: true
+    tuple val(meta), path("*_${out_name_part}.{vcf,vcf.gz,bcf,bcf.gz}"),     emit: vcf
+    tuple val(meta), path("*_${out_name_part}.{vcf,vcf.gz,bcf,bcf.gz}.tbi"), emit: tbi, optional: true
+    tuple val(meta), path("*_${out_name_part}.{vcf,vcf.gz,bcf,bcf.gz}.csi"), emit: csi, optional: true
     path "versions.yml",                                emit: versions
 
     when:
@@ -32,7 +33,7 @@ process BCFTOOLS_ANNOTATE {
                     args.contains("--output-type v") || args.contains("-Ov") ? "vcf" : "vcf"
     def index_command = !index ? "bcftools index ${input}" : ''
 
-    if ("${input}" == "${prefix}.${extension}") {
+    if ("${input}" == "${prefix}_${out_name_part}.${extension}") {
         error("Input and output names are the same, set prefix in module configuration to disambiguate!")
     }
     """
@@ -45,7 +46,7 @@ process BCFTOOLS_ANNOTATE {
         ${columns_file} \\
         ${header_file} \\
         ${rename_chrs_file} \\
-        --output ${prefix}.${extension} \\
+        --output ${prefix}_${out_name_part}.${extension} \\
         --threads ${task.cpus} \\
         ${input}
 
@@ -67,13 +68,13 @@ process BCFTOOLS_ANNOTATE {
                             args.contains("--write-index=csi") || args.contains("-W=csi") ? "csi" :
                             args.contains("--write-index") || args.contains("-W") ? "csi" : ""
     def create_cmd = extension.endsWith(".gz") ? "echo '' | gzip >" : "touch"
-    def create_index = extension.endsWith(".gz") && index_extension.matches("csi|tbi") ? "touch ${prefix}.${extension}.${index_extension}" : ""
+    def create_index = extension.endsWith(".gz") && index_extension.matches("csi|tbi") ? "touch ${prefix}_${out_name_part}.${extension}.${index_extension}" : ""
 
-    if ("${input}" == "${prefix}.${extension}") {
+    if ("${input}" == "${prefix}_${out_name_part}.${extension}") {
         error("Input and output names are the same, set prefix in module configuration to disambiguate!")
     }
     """
-    ${create_cmd} ${prefix}.${extension}
+    ${create_cmd} ${prefix}_${out_name_part}.${extension}
     ${create_index}
 
     cat <<-END_VERSIONS > versions.yml

@@ -53,11 +53,21 @@ workflow NF_PREPARE_VCF {
     ch_input_vcf_tbi = BCFTOOLS_INDEX_1.out.tbi
     ch_versions = ch_versions.mix(BCFTOOLS_INDEX_1.out.versions.first())
 
-    ch_input_vcf_with_index = ch_input_vcf.join(ch_input_vcf_tbi, by: 0)
 
+    BCFTOOLS_ANNOTATE (
+        ch_input_vcf
+            .join(ch_input_vcf_tbi, by: 0)  // Join by the first element (meta)
+            .map { meta, vcf_file, tbi_file -> tuple(meta, vcf_file, tbi_file, [], [], [], []) }
+            .combine(ch_rename_chr),
+        Channel.value("rename_chr"),
+    )
+    ch_annotated_vcf = BCFTOOLS_ANNOTATE.out.vcf
+    ch_annotated_vcf_tbi = BCFTOOLS_ANNOTATE.out.tbi
+    ch_versions = ch_versions.mix(BCFTOOLS_ANNOTATE.out.versions.first())
 
     BCFTOOLS_NORM (
-        ch_input_vcf_with_index
+        ch_annotated_vcf
+            .join(ch_annotated_vcf_tbi, by: 0)
             .combine(ch_vep_cachesubdir.map { t -> "${t}/${params.vep_fasta_path}" })
             .map { meta, vcf_file, tbi_file, fasta_file -> tuple(meta, vcf_file, tbi_file, fasta_file, []) },
         Channel.value("norm"),
@@ -68,19 +78,9 @@ workflow NF_PREPARE_VCF {
     ch_tracking = BCFTOOLS_NORM.out.tracking_out.first()
 
 
-    BCFTOOLS_ANNOTATE (
-        ch_normalized_vcf
-            .join(ch_normalized_vcf_tbi, by: 0)  // Join by the first element (meta)
-            .map { meta, vcf_file, tbi_file -> tuple(meta, vcf_file, tbi_file, [], [], [], []) }
-            .combine(ch_rename_chr),
-    )
-    ch_annotated_vcf = BCFTOOLS_ANNOTATE.out.vcf
-    ch_annotated_vcf_tbi = BCFTOOLS_ANNOTATE.out.tbi
-    ch_versions = ch_versions.mix(BCFTOOLS_ANNOTATE.out.versions.first())
-
-
     VEP_ANNOTATE (
-        ch_annotated_vcf.join(ch_annotated_vcf_tbi, by: 0)
+        ch_normalized_vcf
+            .join(ch_normalized_vcf_tbi, by: 0)
             .combine(ch_vep_cachesubdir),
         Channel.value(params.vep_annotate_species),
         Channel.value(params.vep_fasta_path),
