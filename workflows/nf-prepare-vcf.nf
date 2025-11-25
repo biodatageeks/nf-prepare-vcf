@@ -11,6 +11,9 @@ include { BCFTOOLS_ANNOTATE         } from '../modules/local/bcftools/annotate'
 include { BCFTOOLS_NORM             } from '../modules/local/bcftools/norm'
 include { BCFTOOLS_INDEX as BCFTOOLS_INDEX_1  } from '../modules/local/bcftools/index'
 include { BCFTOOLS_INDEX as BCFTOOLS_INDEX_2  } from '../modules/local/bcftools/index'
+include { BCFTOOLS_VCF2PSAM         } from '../modules/local/bcftools/vcf2psam'
+include { PLINK2_MAKEPGEN           } from '../modules/local/plink2/makepgen'
+include { PLINK2_LD_REPORT          } from '../modules/local/plink2/ld_report'
 include { VEP_ANNOTATE             } from '../modules/local/vep/annotate'
 include { VEP_UPDATECACHE          } from '../modules/local/vep/updatecache'
 
@@ -54,20 +57,11 @@ workflow NF_PREPARE_VCF {
     ch_versions = ch_versions.mix(BCFTOOLS_INDEX_1.out.versions.first())
 
 
-    BCFTOOLS_ANNOTATE (
-        ch_input_vcf
-            .join(ch_input_vcf_tbi, by: 0)  // Join by the first element (meta)
-            .map { meta, vcf_file, tbi_file -> tuple(meta, vcf_file, tbi_file, [], [], [], []) }
-            .combine(ch_rename_chr),
-        Channel.value("rename_chr"),
-    )
-    ch_annotated_vcf = BCFTOOLS_ANNOTATE.out.vcf
-    ch_annotated_vcf_tbi = BCFTOOLS_ANNOTATE.out.tbi
-    ch_versions = ch_versions.mix(BCFTOOLS_ANNOTATE.out.versions.first())
-
+    // NORM must be before ANNOTATE (where we assign variant ids) because we must first split multiallelic sites before assigning variant ids.
+    // Otherwise we'll end up with duplicated ids with a comma within them and this will cause subsequent plink write-snplist steps to fail
     BCFTOOLS_NORM (
-        ch_annotated_vcf
-            .join(ch_annotated_vcf_tbi, by: 0)
+        ch_input_vcf
+            .join(ch_input_vcf_tbi, by: 0)
             .combine(ch_vep_cachesubdir.map { t -> "${t}/${params.vep_fasta_path}" })
             .map { meta, vcf_file, tbi_file, fasta_file -> tuple(meta, vcf_file, tbi_file, fasta_file, []) },
         Channel.value("norm"),
@@ -76,11 +70,22 @@ workflow NF_PREPARE_VCF {
     ch_normalized_vcf_tbi = BCFTOOLS_NORM.out.tbi
     ch_versions = ch_versions.mix(BCFTOOLS_NORM.out.versions.first())
     ch_tracking = BCFTOOLS_NORM.out.tracking_out.first()
+    
+    BCFTOOLS_ANNOTATE (
+        ch_normalized_vcf
+            .join(ch_normalized_vcf_tbi, by: 0)  // Join by the first element (meta)
+            .map { meta, vcf_file, tbi_file -> tuple(meta, vcf_file, tbi_file, [], [], [], []) }
+            .combine(ch_rename_chr),
+        Channel.value("rename_chr"),
+    )
+    ch_annotated_vcf = BCFTOOLS_ANNOTATE.out.vcf
+    ch_annotated_vcf_tbi = BCFTOOLS_ANNOTATE.out.tbi
+    ch_versions = ch_versions.mix(BCFTOOLS_ANNOTATE.out.versions.first())
 
 
     VEP_ANNOTATE (
-        ch_normalized_vcf
-            .join(ch_normalized_vcf_tbi, by: 0)
+        ch_annotated_vcf
+            .join(ch_annotated_vcf_tbi, by: 0)
             .combine(ch_vep_cachesubdir),
         Channel.value(params.vep_annotate_species),
         Channel.value(params.vep_fasta_path),
@@ -105,6 +110,40 @@ workflow NF_PREPARE_VCF {
     )
     ch_all_gene_ranges = COMPUTE_GENE_RANGES.out.gene_ranges
     ch_versions = ch_versions.mix(COMPUTE_GENE_RANGES.out.versions.first())
+
+
+    BCFTOOLS_VCF2PSAM (
+        ch_vep_vcf.join(ch_vep_vcf_tbi, by: 0)
+    )
+    ch_unk_sex_psam = BCFTOOLS_VCF2PSAM.out.psam
+    ch_versions = ch_versions.mix(BCFTOOLS_VCF2PSAM.out.versions.first())
+
+
+    PLINK2_MAKEPGEN (
+        ch_vep_vcf
+            .join(ch_vep_vcf_tbi, by: 0)
+            .join(ch_unk_sex_psam, by: 0)
+            .map { meta, vcf_file, tbi_file, unk_sex_psam_file -> tuple(meta, [], [], unk_sex_psam_file, vcf_file, tbi_file, [], [], [], []) },
+        Channel.value(''),
+        Channel.value(''),
+        Channel.value(params.plink2_makepgen_vcf_input_options),
+        Channel.value('makepgen'),
+        Channel.value(params.plink2_makepgen_options)
+    )
+    ch_pgen_pvar_psam  = PLINK2_MAKEPGEN.out.out_pgen_pvar_psam
+    ch_versions = ch_versions.mix(PLINK2_MAKEPGEN.out.versions.first())
+    ch_tracking = ch_tracking.mix(PLINK2_MAKEPGEN.out.tracking_out.first())
+
+
+    PLINK2_LD_REPORT (
+        ch_pgen_pvar_psam
+            .map { meta, pgen, pvar, psam -> tuple(meta, pgen, pvar, psam, []) },
+        Channel.value('ld_report'),
+        Channel.value(params.plink2_ld_report_options)
+    )
+    ch_ld_report  = PLINK2_LD_REPORT.out.ld_report
+    ch_versions = ch_versions.mix(PLINK2_LD_REPORT.out.versions.first())
+
 
     
     //
