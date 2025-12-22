@@ -135,14 +135,16 @@ workflow NF_PREPARE_VCF {
     ch_tracking = ch_tracking.mix(PLINK2_MAKEPGEN.out.tracking_out.first())
 
 
-    PLINK2_LD_REPORT (
-        ch_pgen_pvar_psam
-            .map { meta, pgen, pvar, psam -> tuple(meta, pgen, pvar, psam, []) },
-        Channel.value('ld_report'),
-        Channel.value(params.plink2_ld_report_options)
-    )
-    ch_ld_report  = PLINK2_LD_REPORT.out.ld_report
-    ch_versions = ch_versions.mix(PLINK2_LD_REPORT.out.versions.first())
+    if (params.skip_ld_report == false) {
+        PLINK2_LD_REPORT (
+            ch_pgen_pvar_psam
+                .map { meta, pgen, pvar, psam -> tuple(meta, pgen, pvar, psam, []) },
+            Channel.value('ld_report'),
+            Channel.value(params.plink2_ld_report_options)
+        )
+        ch_ld_report  = PLINK2_LD_REPORT.out.ld_report
+        ch_versions = ch_versions.mix(PLINK2_LD_REPORT.out.versions.first())
+    }
 
 
     
