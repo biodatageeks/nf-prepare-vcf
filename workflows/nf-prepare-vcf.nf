@@ -9,6 +9,7 @@ include { methodsDescriptionText } from '../subworkflows/local/utils_nfcore_nf-p
 include { COMPUTE_GENE_RANGES       } from '../modules/local/python/compute_gene_ranges'
 include { BCFTOOLS_ANNOTATE         } from '../modules/local/bcftools/annotate'
 include { BCFTOOLS_NORM             } from '../modules/local/bcftools/norm'
+include { BCFTOOLS_SORT             } from '../modules/local/bcftools/sort'
 include { BCFTOOLS_INDEX as BCFTOOLS_INDEX_1  } from '../modules/local/bcftools/index'
 include { BCFTOOLS_INDEX as BCFTOOLS_INDEX_2  } from '../modules/local/bcftools/index'
 include { BCFTOOLS_VCF2PSAM         } from '../modules/local/bcftools/vcf2psam'
@@ -50,18 +51,20 @@ workflow NF_PREPARE_VCF {
     ch_versions = ch_versions.mix(VEP_UPDATECACHE.out.versions.first())
 
 
-    BCFTOOLS_INDEX_1 (
-        ch_input_vcf
+    BCFTOOLS_SORT (
+        ch_input_vcf,
+        Channel.value("sort"),
     )
-    ch_input_vcf_tbi = BCFTOOLS_INDEX_1.out.tbi
-    ch_versions = ch_versions.mix(BCFTOOLS_INDEX_1.out.versions.first())
+    ch_sorted_vcf = BCFTOOLS_SORT.out.vcf
+    ch_sorted_vcf_tbi = BCFTOOLS_SORT.out.tbi
+    ch_versions = ch_versions.mix(BCFTOOLS_SORT.out.versions.first())
 
 
     // NORM must be before ANNOTATE (where we assign variant ids) because we must first split multiallelic sites before assigning variant ids.
     // Otherwise we'll end up with duplicated ids with a comma within them and this will cause subsequent plink write-snplist steps to fail
     BCFTOOLS_NORM (
-        ch_input_vcf
-            .join(ch_input_vcf_tbi, by: 0)
+        ch_sorted_vcf
+            .join(ch_sorted_vcf_tbi, by: 0)
             .combine(ch_vep_cachesubdir.map { t -> "${t}/${params.vep_fasta_path}" })
             .map { meta, vcf_file, tbi_file, fasta_file -> tuple(meta, vcf_file, tbi_file, fasta_file, []) },
         Channel.value("norm"),
