@@ -33,7 +33,6 @@ process BCFTOOLS_SORT {
     bcftools sort \\
         --output ${prefix}_${out_name_part}.${extension} \\
         $args \\
-        --threads $task.cpus \\
         ${vcf}
 
     cat <<-END_VERSIONS > versions.yml
