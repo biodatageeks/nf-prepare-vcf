@@ -12,11 +12,13 @@ include { BCFTOOLS_NORM             } from '../modules/local/bcftools/norm'
 include { BCFTOOLS_SORT             } from '../modules/local/bcftools/sort'
 include { BCFTOOLS_INDEX as BCFTOOLS_INDEX_1  } from '../modules/local/bcftools/index'
 include { BCFTOOLS_INDEX as BCFTOOLS_INDEX_2  } from '../modules/local/bcftools/index'
+include { BCFTOOLS_REHEADER         } from '../modules/local/bcftools/reheader'
 include { BCFTOOLS_VCF2PSAM         } from '../modules/local/bcftools/vcf2psam'
 include { PLINK2_MAKEPGEN           } from '../modules/local/plink2/makepgen'
 include { PLINK2_LD_REPORT          } from '../modules/local/plink2/ld_report'
-include { VEP_ANNOTATE             } from '../modules/local/vep/annotate'
-include { VEP_UPDATECACHE          } from '../modules/local/vep/updatecache'
+include { VEP_ANNOTATE              } from '../modules/local/vep/annotate'
+include { VEP_UPDATECACHE           } from '../modules/local/vep/updatecache'
+include { CALC_DOSAGE_POLARSBIO     } from '../modules/local/python/calc_dosage_polarsbio'
 
 
 
@@ -38,6 +40,7 @@ workflow NF_PREPARE_VCF {
     ch_vep_cachedir = Channel.fromPath(vep_cachedir, checkIfExists: true)
     ch_rename_chr = Channel.fromPath("${projectDir}/assets/rename_chr.txt", checkIfExists: true)
     ch_meta = ch_input_vcf.map { t -> t[0] }
+    python_calc_dosage_polarsbio_script_ch = Channel.fromPath(params.calc_dosage_polarsbio_script_path, checkIfExists: true)
     
 
     VEP_UPDATECACHE (
@@ -98,16 +101,34 @@ workflow NF_PREPARE_VCF {
     ch_versions = ch_versions.mix(VEP_ANNOTATE.out.versions.first())
 
 
-    BCFTOOLS_INDEX_2 (
-        ch_vep_vcf
+    CALC_DOSAGE_POLARSBIO (
+        ch_vep_vcf.combine(python_calc_dosage_polarsbio_script_ch),
+        Channel.value(params.calc_ds_min_gq),
+        Channel.value("calc_dosage")
     )
-    ch_vep_vcf_tbi = BCFTOOLS_INDEX_2.out.tbi
+    ch_with_dosage_vcf = CALC_DOSAGE_POLARSBIO.out.vcf
+    ch_versions = ch_versions.mix(CALC_DOSAGE_POLARSBIO.out.versions.first())
+
+
+    BCFTOOLS_REHEADER (
+        ch_vep_vcf.join(ch_with_dosage_vcf, by: 0),
+        Channel.value("##FORMAT=<ID=DS,Number=1,Type=Float,Description=\"Genotype dosage (expected number of non-reference alleles)\">"),
+        Channel.value("reheader")
+    )
+    ch_with_correct_header_vcf = BCFTOOLS_REHEADER.out.vcf
+    ch_versions = ch_versions.mix(BCFTOOLS_REHEADER.out.versions.first())
+
+
+    BCFTOOLS_INDEX_2 (
+        ch_with_correct_header_vcf
+    )
+    ch_with_correct_header_vcf_tbi = BCFTOOLS_INDEX_2.out.tbi
     ch_versions = ch_versions.mix(BCFTOOLS_INDEX_2.out.versions.first())
 
 
     compute_ranges_py_script_ch = Channel.fromPath(params.compute_ranges_py_script_path, checkIfExists: true)
     COMPUTE_GENE_RANGES (
-        ch_vep_vcf
+        ch_with_correct_header_vcf
             .combine(compute_ranges_py_script_ch),
         Channel.value("compute_ranges")
     )
@@ -116,15 +137,15 @@ workflow NF_PREPARE_VCF {
 
 
     BCFTOOLS_VCF2PSAM (
-        ch_vep_vcf.join(ch_vep_vcf_tbi, by: 0)
+        ch_with_correct_header_vcf.join(ch_with_correct_header_vcf_tbi, by: 0)
     )
     ch_unk_sex_psam = BCFTOOLS_VCF2PSAM.out.psam
     ch_versions = ch_versions.mix(BCFTOOLS_VCF2PSAM.out.versions.first())
 
 
     PLINK2_MAKEPGEN (
-        ch_vep_vcf
-            .join(ch_vep_vcf_tbi, by: 0)
+        ch_with_correct_header_vcf
+            .join(ch_with_correct_header_vcf_tbi, by: 0)
             .join(ch_unk_sex_psam, by: 0)
             .map { meta, vcf_file, tbi_file, unk_sex_psam_file -> tuple(meta, [], [], unk_sex_psam_file, vcf_file, tbi_file, [], [], [], []) },
         Channel.value(''),
@@ -150,7 +171,6 @@ workflow NF_PREPARE_VCF {
     }
 
 
-    
     //
     // Collate and save software versions
     //
