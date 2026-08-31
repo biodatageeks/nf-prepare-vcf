@@ -159,7 +159,7 @@ workflow NF_PREPARE_VCF {
     ch_tracking = ch_tracking.mix(PLINK2_MAKEPGEN.out.tracking_out.first())
 
 
-    if (params.skip_ld_report == false) {
+    if (params.compute_ld_report == true) {
         PLINK2_LD_REPORT (
             ch_pgen_pvar_psam
                 .map { meta, pgen, pvar, psam -> tuple(meta, pgen, pvar, psam, []) },
