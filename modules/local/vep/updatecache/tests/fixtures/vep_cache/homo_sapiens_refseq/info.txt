@@ -1,0 +1,1 @@
+placeholder so the fake cache subdir exists in git; VEP_UPDATECACHE only checks that <cache>/<species> is a directory

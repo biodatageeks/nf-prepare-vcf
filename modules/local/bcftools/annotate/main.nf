@@ -39,8 +39,7 @@ process BCFTOOLS_ANNOTATE {
     """
     ${index_command}
 
-    bcftools \\
-        annotate \\
+    bcftools annotate \\
         ${args} \\
         ${annotations_file} \\
         ${columns_file} \\

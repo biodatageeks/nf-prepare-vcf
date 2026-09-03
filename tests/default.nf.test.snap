@@ -2,32 +2,69 @@
     "-profile test": {
         "content": [
             12,
-            null,
+            {
+                "BCFTOOLS_ANNOTATE": {
+                    "bcftools": 1.22
+                },
+                "BCFTOOLS_INDEX_2": {
+                    "bcftools": 1.2
+                },
+                "BCFTOOLS_NORM": {
+                    "bcftools": 1.2
+                },
+                "BCFTOOLS_REHEADER": {
+                    "bcftools": 1.22
+                },
+                "BCFTOOLS_SORT": {
+                    "bcftools": 1.2
+                },
+                "BCFTOOLS_VCF2PSAM": {
+                    "bcftools": 1.2
+                },
+                "CALC_DOSAGE_POLARSBIO": {
+                    "polars-bio": "0.26.1"
+                },
+                "COMPUTE_GENE_RANGES": {
+                    "python": "3.12.3",
+                    "compute_ranges_py": "0.0.1"
+                },
+                "PLINK2_LD_REPORT": {
+                    "plink2": "2.0.0-a.6.9LM AVX2 Intel (29 Jan 2025)"
+                },
+                "PLINK2_MAKEPGEN": {
+                    "plink2": "2.0.0-a.6.9LM AVX2 Intel (29 Jan 2025)"
+                },
+                "VEP_ANNOTATE": {
+                    "vep": 113.0
+                },
+                "VEP_UPDATECACHE": {
+                    "vep": 113.0
+                },
+                "Workflow": {
+                    "biodatageeks/nf-prepare-vcf": "v1.0.0dev"
+                }
+            },
             [
                 "bcftools_index",
-                "bcftools_index/test_sim_chr22_reheader.vcf.gz.tbi",
+                "bcftools_index/test_rand_500_reheader.vcf.gz.tbi",
                 "bcftools_reheader",
-                "bcftools_reheader/test_sim_chr22_reheader.vcf.gz",
+                "bcftools_reheader/test_rand_500_reheader.vcf.gz",
                 "compute_gene_ranges",
-                "compute_gene_ranges/test_sim_chr22_compute_ranges_gene_ranges.csv",
+                "compute_gene_ranges/test_rand_500_compute_ranges_gene_ranges.csv",
                 "pipeline_info",
                 "pipeline_info/nf-prepare-vcf_software_versions.yml",
                 "plink2_ld_report",
-                "plink2_ld_report/test_sim_chr22_ld_report.log",
-                "plink2_ld_report/test_sim_chr22_ld_report.vcor"
+                "plink2_ld_report/test_rand_500_ld_report.log",
+                "plink2_ld_report/test_rand_500_ld_report.vcor"
             ],
             [
-                "test_sim_chr22_reheader.vcf.gz.tbi:md5,88e4ddf409e50e840c6b26ec54f1ef85",
-                "test_sim_chr22_reheader.vcf.gz:md5,7580e2fac0a7e5c444f0676ef5ca7543",
-                "test_sim_chr22_compute_ranges_gene_ranges.csv:md5,832dc4ed28633570bbbfa832188c0a8d",
-                "test_sim_chr22_ld_report.log:md5,81d2b522807b852cdacb74c3f3db96aa",
-                "test_sim_chr22_ld_report.vcor:md5,f7d371f091042929ff9b9ff18987afe6"
+                "test_rand_500_ld_report.vcor:md5,436774ad3f373801e8c0e5ad6b2ffeba"
             ]
         ],
         "meta": {
             "nf-test": "0.9.3",
             "nextflow": "25.10.2"
         },
-        "timestamp": "2026-05-29T18:10:11.480648589"
+        "timestamp": "2026-09-03T23:09:01.660084817"
     }
 }

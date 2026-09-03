@@ -16,9 +16,9 @@ nextflow_pipeline {
     //
     // This is the upstream home (PB5) for the NORM/ANNOTATE/VEP/dosage invariants that were
     // previously asserted only by the downstream nf-rare-var-assoc PREPARE_VCF wrapper test.
-    // The -profile test sim_chr22 dataset cannot exercise these (it is already clean), so we
-    // override input_vcf to the messy fixture. publish_intermediate=true so BCFTOOLS_NORM
-    // publishes its tracking JSON for the count cross-check.
+    // -profile test runs the same fixture, but only snapshots the output file set --
+    // publish_intermediate=true here so BCFTOOLS_NORM also publishes its tracking JSON for the
+    // count cross-check below.
     // Slow (VEP annotation alone takes minutes); intended for manual / nightly runs.
 
     test("full preparation: multiallelics split, unique CHROM_POS_REF_ALT ids, chr prefix stripped, CSQ + spec-correct DS") {

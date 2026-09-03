@@ -4,11 +4,25 @@ nextflow_pipeline {
     script "../main.nf"
     tag "pipeline"
 
+    // Same inputs as -profile test (conf/test.config), but set explicitly so the test also
+    // runs when nf-test is invoked with a different profile selection (e.g.
+    // `nf-test test --profile low_resources,podman`).
+    //
+    // The fixture must be chr-prefixed: BCFTOOLS_NORM left-aligns against the chr-prefixed
+    // GRCh38 reference, and the "chr" prefix is only stripped later in BCFTOOLS_ANNOTATE.
+    // compute_ld_report is off by default, turned on here so the snapshot covers PLINK2_LD_REPORT.
+    //
+    // This is a snapshot/plumbing smoke test -- the business invariants of the same run are
+    // asserted in tests/prepare_invariants.nf.test.
+
     test("-profile test") {
 
         when {
             params {
-                outdir = "$outputDir"
+                input_vcf         = "${projectDir}/tests/fixtures/unprepared_rand_500.vcf.gz"
+                project_name      = "test_rand_500"
+                outdir            = "$outputDir"
+                compute_ld_report = true
             }
         }
 
@@ -22,8 +36,8 @@ nextflow_pipeline {
                 { assert snapshot(
                     // Number of successful tasks
                     workflow.trace.succeeded().size(),
-                    // pipeline versions.yml file for multiqc from which Nextflow version is removed because we test pipelines on multiple Nextflow versions
-                    removeNextflowVersion("$outputDir/pipeline_info/nf-prepare-vcf_software_mqc_versions.yml"),
+                    // pipeline versions.yml file from which the Nextflow version is removed because we test pipelines on multiple Nextflow versions
+                    removeNextflowVersion("$outputDir/pipeline_info/nf-prepare-vcf_software_versions.yml"),
                     // All stable path name, with a relative path
                     stable_name,
                     // All files with stable contents

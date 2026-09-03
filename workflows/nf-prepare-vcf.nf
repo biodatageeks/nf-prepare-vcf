@@ -38,19 +38,32 @@ workflow NF_PREPARE_VCF {
     ch_versions = Channel.empty()
     vep_cachedir = "${projectDir}/../vep_cachedir"
     ch_vep_cachedir = Channel.fromPath(vep_cachedir, checkIfExists: true)
+    ch_chr_synonyms = Channel.fromPath("${vep_cachedir}/${params.vep_updatecache_species}/${params.vep_chr_synonyms_path}", checkIfExists: true)
     ch_rename_chr = Channel.fromPath("${projectDir}/assets/rename_chr.txt", checkIfExists: true)
     ch_meta = ch_input_vcf.map { t -> t[0] }
     python_calc_dosage_polarsbio_script_ch = Channel.fromPath(params.calc_dosage_polarsbio_script_path, checkIfExists: true)
-    
+
+    // --input_ref_fasta is optional. When given, that FASTA is used as-is as the reference for
+    // BCFTOOLS_NORM and VEP_ANNOTATE, together with the <input_ref_fasta>.fai sitting next to it;
+    // when that index is missing VEP_UPDATECACHE builds it. When --input_ref_fasta is not given,
+    // VEP_UPDATECACHE downloads params.default_ref_fasta_url instead.
+    input_ref_fasta = params.input_ref_fasta ? file(params.input_ref_fasta, checkIfExists: true) : []
+    input_ref_fasta_index = params.input_ref_fasta && file("${params.input_ref_fasta}.fai").exists()
+        ? file("${params.input_ref_fasta}.fai")
+        : []
+
 
     VEP_UPDATECACHE (
         ch_meta.first().combine(ch_vep_cachedir),
         Channel.value(params.vep_updatecache_species),
         Channel.value(params.vep_updatecache_options),
         Channel.value(params.vep_cache_url),
-        Channel.value(tuple(params.ref_fasta_url, params.vep_fasta_path))
+        Channel.value(tuple(params.vep_ref_fasta_url, params.vep_fasta_path)),
+        Channel.value(tuple(input_ref_fasta, input_ref_fasta_index, params.default_ref_fasta_url))
     )
     ch_vep_cachesubdir = VEP_UPDATECACHE.out.cachesubdir.first()
+    ch_ref_fasta = VEP_UPDATECACHE.out.ref_fasta.first()
+    ch_ref_fasta_index = VEP_UPDATECACHE.out.ref_fasta_index.first()
     ch_versions = ch_versions.mix(VEP_UPDATECACHE.out.versions.first())
 
 
@@ -68,8 +81,9 @@ workflow NF_PREPARE_VCF {
     BCFTOOLS_NORM (
         ch_sorted_vcf
             .join(ch_sorted_vcf_tbi, by: 0)
-            .combine(ch_vep_cachesubdir.map { t -> "${t}/${params.vep_fasta_path}" })
-            .map { meta, vcf_file, tbi_file, fasta_file -> tuple(meta, vcf_file, tbi_file, fasta_file, []) },
+            .combine(ch_ref_fasta)
+            .combine(ch_ref_fasta_index)
+            .map { meta, vcf_file, tbi_file, fasta_file, fasta_index_file -> tuple(meta, vcf_file, tbi_file, fasta_file, fasta_index_file, []) },
         Channel.value("norm"),
     )
     ch_normalized_vcf = BCFTOOLS_NORM.out.vcf
@@ -92,9 +106,11 @@ workflow NF_PREPARE_VCF {
     VEP_ANNOTATE (
         ch_annotated_vcf
             .join(ch_annotated_vcf_tbi, by: 0)
+            .combine(ch_ref_fasta)
+            .combine(ch_ref_fasta_index)
+            .combine(ch_chr_synonyms)
             .combine(ch_vep_cachesubdir),
         Channel.value(params.vep_annotate_species),
-        Channel.value(params.vep_fasta_path),
         Channel.value(params.vep_annotate_options)
     )
     ch_vep_vcf  = VEP_ANNOTATE.out.vcf

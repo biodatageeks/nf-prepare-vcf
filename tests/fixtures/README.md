@@ -5,9 +5,10 @@ Integration-test fixtures for `nf-prepare-vcf`.
 ## `unprepared_rand_500.vcf.gz`
 
 Raw, *unprepared* 1000 Genomes high-coverage VCF used by `tests/prepare_invariants.nf.test`
-to exercise the full preparation pipeline on messy input (the `-profile test` sim_chr22
-dataset is already clean -- biallelic, single chromosome, IDs preset -- so it cannot prove the
-NORM/ANNOTATE transformations actually fire).
+to exercise the full preparation pipeline on messy input. It is also the `-profile test` input
+(`conf/test.config`): it replaced the old sim_chr22 dataset, which was already clean --
+biallelic, single chromosome, IDs preset -- so it could not prove the NORM/ANNOTATE
+transformations actually fire, and which was not `chr`-prefixed as BCFTOOLS_NORM now requires.
 
 - 3 chromosomes incl. X: `chr12`, `chr22`, `chrX` (with the `chr` prefix)
 - 3202 samples (1000G high-coverage release, IDs `HG00096`..`NA21144`)

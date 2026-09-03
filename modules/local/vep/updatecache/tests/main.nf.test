@@ -1,0 +1,102 @@
+nextflow_process {
+
+    name "Test Process VEP_UPDATECACHE"
+    script "../main.nf"
+    process "VEP_UPDATECACHE"
+
+    tag "modules"
+    tag "vep"
+    tag "vep/updatecache"
+
+    // These tests cover the --input_ref_fasta branch only, so they stay offline and fast:
+    //   - vep_cache_url = ''      -> no cache download (fixtures/vep_cache already has the
+    //                                homo_sapiens_refseq subdir the process checks for)
+    //   - vep_ref_fasta_url = ''  -> no VEP FASTA download
+    //   - input_ref_fasta given   -> no default reference download
+    // The "no input_ref_fasta" branch downloads a ~3 GB GRCh38 reference and is exercised by
+    // the pipeline tests instead.
+
+    test("input_ref_fasta with an existing .fai - index reused, not rebuilt") {
+
+        when {
+            process {
+                """
+                input[0] = [ [ id:'test' ], file('${projectDir}/modules/local/vep/updatecache/tests/fixtures/vep_cache', checkIfExists: true) ]
+                input[1] = 'homo_sapiens_refseq'
+                input[2] = ''
+                input[3] = ''
+                input[4] = ['', '']
+                input[5] = [
+                    file('${projectDir}/modules/local/vep/updatecache/tests/fixtures/ref_fasta_tiny.fa', checkIfExists: true),
+                    file('${projectDir}/modules/local/vep/updatecache/tests/fixtures/ref_fasta_tiny.fa.fai', checkIfExists: true),
+                    ''
+                ]
+                """
+            }
+        }
+
+        then {
+            assert process.success
+
+            // The supplied FASTA is passed through untouched...
+            def fasta = file(process.out.ref_fasta[0])
+            assert fasta.text == file('modules/local/vep/updatecache/tests/fixtures/ref_fasta_tiny.fa').text :
+                "the supplied --input_ref_fasta must be used as the reference as-is"
+
+            // ...and so is the index that sits next to it.
+            def fai = file(process.out.ref_fasta_index[0])
+            assert fai.text == file('modules/local/vep/updatecache/tests/fixtures/ref_fasta_tiny.fa.fai').text :
+                "the existing <input_ref_fasta>.fai must be reused verbatim"
+
+            // A rebuilt index would be byte-identical, so prove reuse structurally: the emitted
+            // index is a symlink that resolves back to the supplied fixture, not a new file.
+            def fai_target = new File(process.out.ref_fasta_index[0]).canonicalPath
+            assert fai_target.endsWith('modules/local/vep/updatecache/tests/fixtures/ref_fasta_tiny.fa.fai') :
+                "an existing .fai must be reused, not rebuilt; emitted index resolved to ${fai_target}"
+        }
+
+    }
+
+    test("input_ref_fasta without a .fai - index is built") {
+
+        when {
+            process {
+                """
+                input[0] = [ [ id:'test' ], file('${projectDir}/modules/local/vep/updatecache/tests/fixtures/vep_cache', checkIfExists: true) ]
+                input[1] = 'homo_sapiens_refseq'
+                input[2] = ''
+                input[3] = ''
+                input[4] = ['', '']
+                // [] for the index: this is what the workflow passes when no <fasta>.fai exists
+                // next to --input_ref_fasta
+                input[5] = [
+                    file('${projectDir}/modules/local/vep/updatecache/tests/fixtures/ref_fasta_tiny.fa', checkIfExists: true),
+                    [],
+                    ''
+                ]
+                """
+            }
+        }
+
+        then {
+            assert process.success
+
+            def fasta = file(process.out.ref_fasta[0])
+            assert fasta.text == file('modules/local/vep/updatecache/tests/fixtures/ref_fasta_tiny.fa').text :
+                "the supplied --input_ref_fasta must be used as the reference as-is"
+
+            // No index was staged, so the emitted one must be a real file built in the task work
+            // dir -- not a symlink back to the fixtures directory.
+            def fai_target = new File(process.out.ref_fasta_index[0]).canonicalPath
+            assert !fai_target.contains('/tests/fixtures/') :
+                "with no .fai supplied the index must be built here; resolved to ${fai_target}"
+
+            // faidx format: name, length, offset of first base, bases per line, bytes per line.
+            def fai = file(process.out.ref_fasta_index[0])
+            assert fai.text == file('modules/local/vep/updatecache/tests/fixtures/ref_fasta_tiny.fa.fai').text :
+                "the built index must match samtools/htslib faidx output; got:\n${fai.text}"
+        }
+
+    }
+
+}

@@ -10,7 +10,7 @@ nextflow_process {
     tag "bcftools/norm"
 
     // FASTA reference: sarscov2 genome.fasta.gz (chromosome MT192765.1) from nf-core test data.
-    // Consolidated tuple shape: (meta, vcf, tbi, fasta, tracking_in) + val(out_name_part).
+    // Consolidated tuple shape: (meta, vcf, tbi, fasta, fasta_index, tracking_in) + val(out_name_part).
     //
     // Fixtures under tests/fixtures/:
     //   multiallelic_sarscov2.vcf.gz - 8 records, 3 multiallelic sites (MT192765.1, 2/2/3 ALTs)
@@ -31,6 +31,7 @@ nextflow_process {
                     file('${projectDir}/modules/local/bcftools/norm/tests/fixtures/multiallelic_sarscov2.vcf.gz', checkIfExists: true),
                     file('${projectDir}/modules/local/bcftools/norm/tests/fixtures/multiallelic_sarscov2.vcf.gz.tbi', checkIfExists: true),
                     file(params.modules_testdata_base_path + 'genomics/sarscov2/genome/genome.fasta.gz', checkIfExists: true),
+                    file(params.modules_testdata_base_path + 'genomics/sarscov2/genome/genome.fasta.gz.fai', checkIfExists: true),
                     []
                 ]
                 input[1] = 'norm'
@@ -68,6 +69,7 @@ nextflow_process {
                     file('${projectDir}/modules/local/bcftools/norm/tests/fixtures/split_sarscov2.vcf.gz', checkIfExists: true),
                     file('${projectDir}/modules/local/bcftools/norm/tests/fixtures/split_sarscov2.vcf.gz.tbi', checkIfExists: true),
                     file(params.modules_testdata_base_path + 'genomics/sarscov2/genome/genome.fasta.gz', checkIfExists: true),
+                    file(params.modules_testdata_base_path + 'genomics/sarscov2/genome/genome.fasta.gz.fai', checkIfExists: true),
                     []
                 ]
                 input[1] = 'norm'
@@ -105,6 +107,7 @@ nextflow_process {
                     file(params.modules_testdata_base_path + 'genomics/sarscov2/illumina/vcf/test.vcf.gz', checkIfExists: true),
                     file(params.modules_testdata_base_path + 'genomics/sarscov2/illumina/vcf/test.vcf.gz.tbi', checkIfExists: true),
                     file(params.modules_testdata_base_path + 'genomics/sarscov2/genome/genome.fasta.gz', checkIfExists: true),
+                    file(params.modules_testdata_base_path + 'genomics/sarscov2/genome/genome.fasta.gz.fai', checkIfExists: true),
                     []
                 ]
                 input[1] = 'norm'

@@ -18,6 +18,13 @@
                     "exists": true,
                     "fa_icon": "fas fa-file-csv"
                 },
+                "input_ref_fasta": {
+                    "type": "string",
+                    "format": "file-path",
+                    "exists": true,
+                    "description": "Reference FASTA to normalize and annotate against. Its <input_ref_fasta>.fai is used when present, otherwise the index is built. If not given, default_ref_fasta_url is downloaded instead.",
+                    "fa_icon": "fas fa-dna"
+                },
                 "outdir": {
                     "type": "string",
                     "format": "directory-path",

@@ -1,6 +1,6 @@
 process BCFTOOLS_NORM {
     tag "$meta.id"
-    label 'process_medium'
+    label 'process_low'
 
     conda "${moduleDir}/environment.yml"
     container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
@@ -8,7 +8,7 @@ process BCFTOOLS_NORM {
         'biocontainers/bcftools:1.20--h8b25389_0' }"
 
     input:
-    tuple val(meta), path(vcf), path(tbi), path(fasta), path(tracking_in)
+    tuple val(meta), path(vcf), path(tbi), path(fasta), path(fasta_index), path(tracking_in)
     val(out_name_part)
 
     output:

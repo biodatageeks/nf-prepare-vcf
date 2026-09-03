@@ -1,2 +1,14 @@
 .DS_Store
 pipeline_info/*.{html,json,txt,yml}
+
+# Everything downstream of VEP_ANNOTATE is not byte-reproducible: VEP stamps its run time into
+# the header (as do bcftools norm/annotate) and emits a variant's CSQ sub-annotations in a
+# per-run order (e.g. "IFFO1,NOP2" one run, "NOP2,IFFO1" the next). The record set and record
+# order are identical between runs, only the bytes differ -- so these files are checked by name
+# here, and their contents are asserted semantically in tests/prepare_invariants.nf.test.
+bcftools_reheader/*.vcf.gz
+bcftools_index/*.tbi
+# gene_ranges rows follow CSQ order, so they inherit the same instability
+compute_gene_ranges/*.csv
+# plink2 writes hostname, working directory and start time into its .log
+plink2_ld_report/*.log

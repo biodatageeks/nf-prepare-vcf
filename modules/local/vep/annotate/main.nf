@@ -1,8 +1,8 @@
 
 process VEP_ANNOTATE {
     tag "$meta.id"
+    label 'process_high'
     label 'process_long'
-    label 'process_medium_memory'
 
     conda "${moduleDir}/environment.yml"
     container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
@@ -10,9 +10,8 @@ process VEP_ANNOTATE {
         'docker.io/psuszynski/ensembl-vep:113.4.3' }"
 
     input:
-    tuple val(meta), path(input_vcf), path(input_vcf_tbi), path(vep_cache)
+    tuple val(meta), path(input_vcf), path(input_vcf_tbi), path(ref_fasta), path(ref_fasta_index), path(chr_synonyms), path(vep_cache)
     val(species)
-    val(fasta_path)
     val(input_args)
 
     output:
@@ -28,7 +27,8 @@ process VEP_ANNOTATE {
     """
     vep \\
         --dir ${vep_cache}/.. \\
-        --fasta ${vep_cache}/${fasta_path} \\
+        --fasta ${ref_fasta} \\
+        --synonyms ${chr_synonyms} \\
         -i ${input_vcf} \\
         -o ${prefix}_vep.vcf.gz \\
         --fork ${task.cpus} \\
