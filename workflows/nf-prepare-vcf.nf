@@ -38,7 +38,6 @@ workflow NF_PREPARE_VCF {
     ch_versions = Channel.empty()
     vep_cachedir = "${projectDir}/../vep_cachedir"
     ch_vep_cachedir = Channel.fromPath(vep_cachedir, checkIfExists: true)
-    ch_chr_synonyms = Channel.fromPath("${vep_cachedir}/${params.vep_updatecache_species}/${params.vep_chr_synonyms_path}", checkIfExists: true)
     ch_rename_chr = Channel.fromPath("${projectDir}/assets/rename_chr.txt", checkIfExists: true)
     ch_meta = ch_input_vcf.map { t -> t[0] }
     python_calc_dosage_polarsbio_script_ch = Channel.fromPath(params.calc_dosage_polarsbio_script_path, checkIfExists: true)
@@ -62,6 +61,8 @@ workflow NF_PREPARE_VCF {
         Channel.value(tuple(input_ref_fasta, input_ref_fasta_index, params.default_ref_fasta_url))
     )
     ch_vep_cachesubdir = VEP_UPDATECACHE.out.cachesubdir.first()
+    // derived from the cache subdir so it is resolved only after the cache has been unpacked
+    ch_chr_synonyms = ch_vep_cachesubdir.map { d -> file("${d}/${params.vep_chr_synonyms_path}", checkIfExists: true) }
     ch_ref_fasta = VEP_UPDATECACHE.out.ref_fasta.first()
     ch_ref_fasta_index = VEP_UPDATECACHE.out.ref_fasta_index.first()
     ch_versions = ch_versions.mix(VEP_UPDATECACHE.out.versions.first())
