@@ -1,14 +1,18 @@
 name: bcftools_norm
-description: Normalize VCF file
+description: Normalize a VCF file and recount INFO/AC,AN from the normalized records
 keywords:
   - normalize
   - norm
+  - fill-tags
   - variant calling
   - VCF
 tools:
   - norm:
       description: |
-        Normalize VCF files.
+        Normalize VCF files. The output is piped through `bcftools +fill-tags -t AC,AN`, so
+        the allele counts describe the records as they come out of the split rather than as
+        they were in the input. `ext.args` configures norm, `ext.args2` the fill-tags end of
+        the pipe, which writes the output file and its index.
       homepage: http://samtools.github.io/bcftools/bcftools.html
       documentation: http://www.htslib.org/doc/bcftools.html
       doi: 10.1093/bioinformatics/btp352

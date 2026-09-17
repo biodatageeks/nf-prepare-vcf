@@ -52,4 +52,44 @@ nextflow_process {
 
     }
 
+    test("a FORMAT/DS the original header already declares is not added a second time") {
+
+        when {
+            process {
+                """
+                // Both fixtures hold the same records and samples; they differ only in their
+                // header. The original declares DS as Number=A, so the line offered here is
+                // already there and must be dropped rather than duplicated -- bcftools rejects a
+                // header that defines the same ID twice, and CALC_DOSAGE_POLARSBIO deliberately
+                // keeps an input DS definition instead of replacing it with ours.
+                input[0] = [
+                    [ id:'test' ],
+                    file('${projectDir}/tests/fixtures/dosage_cases_ds_a.vcf.gz', checkIfExists: true),
+                    file('${projectDir}/tests/fixtures/dosage_cases_no_ds.vcf.gz', checkIfExists: true)
+                ]
+                input[1] = '##FORMAT=<ID=DS,Number=1,Type=Float,Description="Genotype dosage (expected number of non-reference alleles)">'
+                input[2] = 'reheader'
+                """
+            }
+        }
+
+        then {
+            assert process.success
+
+            def header = ["bash", "-c", "zcat ${process.out.vcf[0][1]}"].execute().text
+                .split('\n').findAll { it.startsWith('##') }
+
+            assert header.count { it.startsWith('##FORMAT=<ID=DS,') } == 1 :
+                "DS must be declared exactly once, got:\n" + header.findAll { it.startsWith('##FORMAT=<ID=DS,') }.join('\n')
+            // The one kept is the original's, not the line offered to the process.
+            assert header.any { it.startsWith('##FORMAT=<ID=DS,Number=A,') } :
+                "the original header's own DS definition must be the one that survives"
+
+            // Unrelated lines from the original header are still carried over.
+            assert header.any { it.startsWith('##FORMAT=<ID=PL,') } :
+                "the rest of the original header must be preserved"
+        }
+
+    }
+
 }

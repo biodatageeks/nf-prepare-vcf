@@ -12,9 +12,10 @@ nextflow_process {
     // FASTA reference: sarscov2 genome.fasta.gz (chromosome MT192765.1) from nf-core test data.
     // Consolidated tuple shape: (meta, vcf, tbi, fasta, fasta_index, tracking_in) + val(out_name_part).
     //
-    // Fixtures under tests/fixtures/:
-    //   multiallelic_sarscov2.vcf.gz - 8 records, 3 multiallelic sites (MT192765.1, 2/2/3 ALTs)
-    //   split_sarscov2.vcf.gz        - 12 records, all biallelic (pre-split form of the above)
+    // Fixtures under tests/fixtures/ (see the README there for the genotypes):
+    //   multiallelic_sarscov2.vcf.gz         - 8 records, 3 multiallelic sites (2/2/3 ALTs)
+    //   split_sarscov2.vcf.gz                - 12 records, all biallelic (pre-split form)
+    //   multiallelic_samples_sarscov2.vcf.gz - the same 8 records with 3 diploid samples
 
     test("split-multiallelic (-m -any): variant count increases from 8 to 12") {
 
@@ -126,6 +127,68 @@ nextflow_process {
             assert tracking.outputs.variants == tracking.inputs.variants : "basic norm must not change variant count"
 
             assert snapshot(process.out.versions).match()
+        }
+
+    }
+
+    test("AC/AN are recounted per allele after the split") {
+
+        config "./nextflow.config"
+
+        when {
+            process {
+                """
+                // Same 8 records as the split test, with genotypes, so the +fill-tags the module
+                // pipes norm into has something to count. The dosage step downstream treats a
+                // missing INFO/AC or INFO/AN as a hard error, so this is what keeps it fed.
+                input[0] = [
+                    [ id:'test' ],
+                    file('${projectDir}/modules/local/bcftools/norm/tests/fixtures/multiallelic_samples_sarscov2.vcf.gz', checkIfExists: true),
+                    file('${projectDir}/modules/local/bcftools/norm/tests/fixtures/multiallelic_samples_sarscov2.vcf.gz.tbi', checkIfExists: true),
+                    file(params.modules_testdata_base_path + 'genomics/sarscov2/genome/genome.fasta.gz', checkIfExists: true),
+                    file(params.modules_testdata_base_path + 'genomics/sarscov2/genome/genome.fasta.gz.fai', checkIfExists: true),
+                    []
+                ]
+                input[1] = 'norm'
+                """
+            }
+        }
+
+        then {
+            assert process.success
+
+            def lines = ["bash", "-c", "zcat ${process.out.vcf[0][1]}"].execute().text.split('\n') as List
+            def records = lines.findAll { it && !it.startsWith('#') }.collect { it.split('\t') }
+            def infoOf = { String[] c -> c[7].split(';').collectEntries { kv ->
+                def p = kv.split('=', 2); [(p[0]): p.size() == 2 ? p[1] : true]
+            } }
+            def acAt = { int pos, String alt ->
+                infoOf(records.find { (it[1] as int) == pos && it[4] == alt })['AC']
+            }
+
+            assert lines.any { it.startsWith('##INFO=<ID=AC,') } :
+                "+fill-tags must declare INFO/AC in the output header"
+            assert lines.any { it.startsWith('##INFO=<ID=AN,') } :
+                "+fill-tags must declare INFO/AN in the output header"
+
+            assert records.size() == 12 : "the split must still happen: 8 records in, 12 out"
+            records.each { c ->
+                def info = infoOf(c)
+                assert info['AC'] != null && info['AN'] != null :
+                    "every record needs AC and AN, missing at POS ${c[1]}: ${c[7]}"
+                // The whole point of recounting after the split: one count per record, not the
+                // original multiallelic list carried over intact.
+                assert !info['AC'].contains(',') :
+                    "AC must hold one value per split record, got ${info['AC']} at POS ${c[1]}"
+            }
+
+            // Counted from the genotypes, not copied: a split site gets a count per allele, and a
+            // missing genotype lowers AN. The fixture README tabulates all of them.
+            assert acAt(200, 'T') == '2' && acAt(200, 'G') == '2' : "each allele of a split site is counted separately"
+            assert acAt(500, 'G') == '6' : "three 1/1 genotypes give AC=6"
+            assert acAt(800, 'T') == '0' : "an allele nobody carries gets AC=0, not a missing tag"
+            assert infoOf(records.find { (it[1] as int) == 700 })['AN'] == '4' :
+                "AN must exclude the missing genotype (2 called samples of 3)"
         }
 
     }

@@ -21,6 +21,47 @@ contain an allele frequency field in the INFO column.
 For genotype dosages to be computed, the FORMAT field must contain genotype likelihoods (`PL`) alongside `GT`, `GQ` and `DP`.
 Without them the pipeline still runs, but on hard genotype calls only (in such case `GT`, `GQ` and `DP` are mandatory).
 
+### Genotype dosage options
+
+A dosage is the expected number of alternative alleles, computed from `PL` by Bayes' theorem. What
+the pipeline assumes `PL` means decides which prior it applies, and that is the single largest
+influence on the resulting dosages.
+
+- `--variant_caller` (default: empty) — the caller that produced the input, used to decide how to
+  read `PL`. Empty means detect it from the input header: a caller named in `##source` or
+  `##GATKCommandLine`, otherwise `FORMAT` fields that only one caller emits. A file that identifies
+  no caller is assumed to be GATK-like, and the pipeline says so loudly in the log.
+- `--pl_type` (default: `auto`) — overrides the above. `likelihood` (GATK-like) means `PL` holds
+  pure genotype likelihoods, as the VCF specification defines them, so a Hardy-Weinberg prior at
+  the variant's allele frequency is applied. `posterior` (DeepVariant-like) means `PL` already
+  carries the caller's own prior, so it is only normalised.
+- `--ds_prior_min_af` (default: 0) — floor on the allele frequency used in the prior. It softens
+  how strongly a rare variant pulls a weak carrier's dosage towards 0. The estimate is already
+  floored at `1/2 / (AN + 1)`, so 0 does not mean a zero frequency.
+- `--ds_max_pl_min` (default: 30) — genotypes whose smallest `PL` value reaches this get no dosage.
+  Splitting a multiallelic record leaves a sample that carries some *other* alternative allele
+  with a `PL` that has no zero in it, because the entry that was 0 belonged to a genotype the
+  split record cannot express. Such a sample supports neither this alternative allele nor the
+  reference, so it is left out rather than dosed; below the threshold its dosage is weighted
+  between the likelihoods and its `GT`. Raise it to dose more of these genotypes, lower it to
+  drop them sooner.
+- `--force_dosage_recalc` (default: `false`) — by default a `FORMAT/DS` already declared in the
+  input header is trusted and passed through untouched. This recomputes every dosage instead.
+- `--calc_ds_min_gq` (default: 3) — genotypes below this `GQ` get no dosage.
+
+Haploid genotypes — male chrX outside the pseudo-autosomal regions, chrY, the mitochondrial
+genome — are dosed on the haploid scale, so their `DS` lies in `[0, 1]` rather than `[0, 2]`. That
+is the VCF reading of `DS` as the expected number of alternative alleles, and it is what keeps the
+dosage on the same scale as the hard call beside it: PLINK 2 reads the ploidy off `GT`, not off
+the sample's declared sex, and doubles a haploid dosage on import, exactly as it counts a
+hemizygous hard call as two copies.
+
+The dosage step writes a tracking JSON beside its output, as `BCFTOOLS_NORM` does, saying how many
+genotypes were computed, how many were reconstructed from `GQ`, and how many were left without a
+dosage, along with any warning the run raised. When the input's own dosages are trusted the query
+never runs, so the counts are all `null` and `passthrough` is `true`. It is published with the
+other intermediates, under `--publish_intermediate`.
+
 ## Core Nextflow arguments
 
 > [!NOTE]

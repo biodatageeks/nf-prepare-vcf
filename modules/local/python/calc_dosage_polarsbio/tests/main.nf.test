@@ -1,0 +1,861 @@
+nextflow_process {
+
+    name "Test process CALC_DOSAGE_POLARSBIO"
+    script "../main.nf"
+    process "CALC_DOSAGE_POLARSBIO"
+    tag "calc_dosage"
+
+    // Fast, per-genotype tests of the dosage calculation, run against the crafted fixtures in
+    // tests/fixtures/dosage_cases_*.vcf.gz (see tests/fixtures/make_dosage_cases.py).
+    //
+    // The existing pipeline test (tests/prepare_invariants.nf.test) runs the whole pipeline on
+    // real 1000G data and checks DS in aggregate. It is slow (VEP alone takes minutes) and it
+    // cannot reach the cases the dosage code actually branches on: the 1000G fixture contains
+    // no all-zero PL, no missing PL and no pre-existing DS, its haploid genotypes were dropped
+    // by the old implementation without any assertion noticing, and the split-multiallelic
+    // genotypes it does contain sit at whatever min(PL) the data happen to give. These tests
+    // exist to cover exactly those branches, one named sample per case.
+    //
+    // The fixtures already carry INFO/AC,AN, which the pipeline supplies via
+    // `bcftools +fill-tags` immediately upstream of this process.
+
+    // =====================================================================================
+    // Reference implementation of the dosage spec, deliberately written independently of the
+    // SQL in assets/calc_dosage.py. Kept in one place and shared by the tests below.
+    // =====================================================================================
+
+    // p-hat = (AC + 1/2) / (AN + 1), floored at dsPriorMinAf.
+    def priorAf = { int ac, int an, double dsPriorMinAf ->
+        double pHat = (ac + 0.5d) / (an + 1.0d)
+        return Math.max(pHat, dsPriorMinAf)
+    }
+
+    // Genotype priors for a given ploidy. plType 'posterior' => flat (PL already holds
+    // posteriors, so applying a population prior would count it twice); 'likelihood' => HWE.
+    def priors = { int ploidy, double p, String plType ->
+        if (plType == 'posterior') {
+            return (0..ploidy).collect { 1.0d / (ploidy + 1) }
+        }
+        if (ploidy == 1) return [1.0d - p, p]
+        return [(1.0d - p) * (1.0d - p), 2.0d * p * (1.0d - p), p * p]
+    }
+
+    // DS = sum_g g * pi_g * L_g / sum_g pi_g * L_g, with L_g = 10^(-PL_g/10).
+    def dosageFromPl = { List<Integer> pls, int ploidy, double p, String plType ->
+        if (pls == null || pls.size() != ploidy + 1) return null
+        def pi = priors(ploidy, p, plType)
+        double num = 0.0d, den = 0.0d
+        pls.eachWithIndex { plv, g ->
+            double l = (plv >= 255) ? 0.0d : Math.pow(10.0d, -(plv as double) / 10.0d)
+            double t = pi[g] * l
+            den += t
+            num += g * t
+        }
+        if (den <= 0) return null
+        return num / den
+    }
+
+    // Reconstruction for a hom-ref call whose PL is all zeros or absent (Definition S).
+    // GQ gives the probability that the call is wrong; that probability is then split among
+    // the other genotypes in proportion to their priors. Only hom-ref calls are reconstructed.
+    def dosageFromGq = { int gq, int ploidy, double p ->
+        double w = Math.min(Math.pow(10.0d, -(gq as double) / 10.0d), ploidy / (ploidy + 1.0d))
+        if (ploidy == 1) return w
+        // diploid: P(0/1) = w * 2(1-p)/(2-p), P(1/1) = w * p/(2-p), DS = 2w/(2-p)
+        return 2.0d * w / (2.0d - p)
+    }
+
+    // ---- VCF parsing helpers -------------------------------------------------------------
+    def readVcf = { String path ->
+        def lines = ["bash", "-c", "zcat ${path}"].execute().text.split('\n') as List
+        def headerLine = lines.find { it.startsWith('#CHROM') }
+        def samples = headerLine.split('\t')[9..-1] as List
+        def records = [:]
+        // Keyed by ID, which the crafted fixtures name after the case they carry. A real file
+        // may leave every ID as '.', so records are also keyed by position.
+        def byPos = [:]
+        lines.findAll { it && !it.startsWith('#') }.each { line ->
+            def c = line.split('\t')
+            def keys = c[8].split(':') as List
+            def bySample = [:]
+            samples.eachWithIndex { s, i ->
+                def vals = c[9 + i].split(':') as List
+                def m = [:]
+                keys.eachWithIndex { k, ki -> m[k] = ki < vals.size() ? vals[ki] : '.' }
+                bySample[s] = m
+            }
+            def info = [:]
+            c[7].split(';').each { kv ->
+                def parts = kv.split('=', 2)
+                if (parts.size() == 2) info[parts[0]] = parts[1]
+            }
+            def record = [chrom: c[0], pos: c[1], info: info, fmt: keys, s: bySample]
+            records[c[2]] = record
+            byPos["${c[0]}:${c[1]}".toString()] = record
+        }
+        return [header: lines.findAll { it.startsWith('##') }, samples: samples,
+                rec: records, atPos: byPos]
+    }
+
+    def plOf = { Map g ->
+        def raw = g['PL']
+        if (raw == null || raw == '.') return null
+        return raw.split(',').collect { it == '.' ? 0 : it.toInteger() }
+    }
+
+    def ploidyOf = { Map g -> g['GT'].replace('|', '/').split('/').size() }
+
+    def dsOf = { Map g -> (g['DS'] == null || g['DS'] == '.') ? null : (g['DS'] as double) }
+
+    // The script's own messages go to the task's stdout, which nf-test does not expose --
+    // `process.stdout` is Nextflow's console output. Read .command.out from the work directory,
+    // which is where any output file lives.
+    def taskStdout = { String anyOutputPath ->
+        new File(new File(anyOutputPath).parentFile, '.command.out').readLines()
+    }
+
+    def taskCommand = { String anyOutputPath ->
+        new File(new File(anyOutputPath).parentFile, '.command.sh').text
+    }
+
+    def readTracking = { String trackingPath ->
+        new groovy.json.JsonSlurper().parseText(new File(trackingPath).text)
+    }
+
+    // `projectDir` is a Nextflow variable: it resolves inside the triple-quoted process blocks
+    // below, but not out here in the suite, so paths needed on the nf-test side are taken
+    // relative to the working directory instead (nf-test runs from the project root).
+    def fixture = { String name -> new File("tests/fixtures/${name}").absolutePath }
+    def TOL = 1e-4
+    // The script's default for --ds-max-pl-min, which every config below inherits except
+    // splitkeep.config; the reference dosage has to apply the same cut-off.
+    def SPLIT_PL_CUTOFF = 30
+
+    // Copies of this record's ALT according to GT, which is what a PL with no zero in it leaves
+    // as the only evidence about the genotypes the record cannot express.
+    def gtAltCount = { Map g -> g['GT'].replace('|', '/').split('/').count { it == '1' } }
+
+    // Every genotype with a usable PL must match the reference dosage under the given prior.
+    // Returns how many were checked, so a test can assert the fixture really exercised it.
+    def specCheckUsablePl = { Map out, String plType, double minAf ->
+        int checked = 0
+        // By position, not by ID: a real file leaves every ID as '.'.
+        out.atPos.each { vid, r ->
+            double p = priorAf(r.info['AC'] as int, r.info['AN'] as int, minAf)
+            r.s.each { sname, g ->
+                def pls = plOf(g)
+                int m = ploidyOf(g)
+                if (g['GT'].contains('.')) return           // masked / missing
+                if (pls == null || pls.size() != m + 1) return
+                if (pls.every { it == 0 }) return           // reconstruction path, checked separately
+                if (g['GQ'] == '.' || (g['GQ'] as int) < 3) return
+                // A PL with no zero belongs to a genotype this record cannot express: at or above
+                // the cut-off it must carry no dosage, below it the likelihoods hold only the
+                // share of the probability mass the record accounts for and GT holds the rest.
+                int plMin = pls.min()
+                if (plMin >= SPLIT_PL_CUTOFF) {
+                    assert dsOf(g) == null :
+                        "${vid}/${sname}: min(PL)=${plMin} is at or above the cut-off, so DS must " +
+                        "be missing, got ${dsOf(g)}"
+                    return
+                }
+                double weight = Math.pow(10.0d, -plMin / 10.0d)
+                def expected = weight * dosageFromPl(pls, m, p, plType) +
+                               (1.0d - weight) * gtAltCount(g)
+                def actual = dsOf(g)
+                assert actual != null :
+                    "${vid}/${sname}: DS must be present for a usable PL, got missing"
+                assert Math.abs(actual - expected) < TOL :
+                    "${vid}/${sname}: DS ${actual} != ${plType} spec ${expected} " +
+                    "(PL=${g['PL']}, ploidy=${m}, p=${p})"
+                checked++
+            }
+        }
+        return checked
+    }
+
+    // =====================================================================================
+
+    test("no DS in input: DS computed for every usable genotype, haploid included") {
+        config "./likelihood.config"
+
+        when {
+            process {
+                """
+                input[0] = [
+                    [ id:'no_ds' ],
+                    file("${projectDir}/tests/fixtures/dosage_cases_no_ds.vcf.gz", checkIfExists: true),
+                    file("${projectDir}/modules/local/python/calc_dosage_polarsbio/assets/calc_dosage.py", checkIfExists: true)
+                ]
+                input[1] = 3
+                input[2] = 'calc_dosage'
+                """
+            }
+        }
+
+        then {
+            assert process.success
+
+            def out = readVcf(process.out.vcf[0][1])
+
+            // The input declares no FORMAT/DS, so this process must add the header line itself.
+            assert out.header.any { it.startsWith('##FORMAT=<ID=DS,') } :
+                "process must add a ##FORMAT=<ID=DS,...> line when the input header lacks one"
+            assert out.header.count { it.startsWith('##FORMAT=<ID=DS,') } == 1 :
+                "DS must be declared exactly once"
+
+            // ---- confident calls collapse onto the integer GT dosage --------------------
+            def common = out.rec['common']
+            assert dsOf(common.s['M01']) < 0.001 : "confident 0/0 must have DS ~ 0, got ${dsOf(common.s['M01'])}"
+            assert Math.abs(dsOf(common.s['M09']) - 1.0d) < 0.01 : "confident 0/1 must have DS ~ 1"
+            assert Math.abs(dsOf(common.s['F12']) - 2.0d) < 0.01 : "confident 1/1 must have DS ~ 2"
+
+            // ---- every diploid genotype with a usable PL matches the spec ---------------
+            int checked = specCheckUsablePl(out, 'likelihood', 0.0d)
+            assert checked > 100 : "expected to spec-check many genotypes, only checked ${checked}"
+
+            // ---- haploid genotypes must get a dosage in [0,1], not a missing value -------
+            def x = out.rec['x_nonpar_mixed']
+            assert dsOf(x.s['M01']) != null :
+                "haploid genotypes must get a DS (the old implementation left them missing)"
+            assert dsOf(x.s['M01']) >= 0.0d && dsOf(x.s['M01']) <= 1.0d :
+                "haploid DS must lie in [0,1], got ${dsOf(x.s['M01'])}"
+            assert Math.abs(dsOf(x.s['M06']) - 1.0d) < 0.01 :
+                "confident haploid alt call must have DS ~ 1, got ${dsOf(x.s['M06'])}"
+            assert dsOf(x.s['M01']) < 0.001 :
+                "confident haploid ref call must have DS ~ 0, got ${dsOf(x.s['M01'])}"
+            // ...and the diploid females at the same record still run on the diploid scale.
+            assert Math.abs(dsOf(x.s['F11']) - 2.0d) < 0.01 :
+                "diploid female at a mixed-ploidy chrX record must still reach DS ~ 2"
+
+            // ---- a masked haploid genotype keeps its ploidy -----------------------------
+            assert x.s['M12']['GT'] == '.' :
+                "a missing haploid GT must stay '.', not become './.' (got ${x.s['M12']['GT']})"
+
+            // ---- PL length inconsistent with GT ploidy -> DS missing --------------------
+            assert dsOf(out.rec['bad_pl_len'].s['M01']) == null :
+                "diploid GT with 2 PL values must leave DS missing"
+            assert dsOf(out.rec['x_bad_pl_len'].s['M01']) == null :
+                "haploid GT with 3 PL values must leave DS missing"
+
+            // ---- the tracking file counts what the output actually contains -------------
+            // Recounted from the written VCF, which is the only independent check there is:
+            // the counts come from the same query as the dosages, so they can only be wrong
+            // together with it or not at all.
+            def tracking = readTracking(process.out.tracking_out[0])
+            assert !tracking.passthrough : "a computed file must not be reported as passed through"
+            int total = 0, reconstructed = 0, computed = 0, missing = 0
+            out.atPos.each { rname, r ->
+                r.s.each { sname, g ->
+                    total++
+                    def pl = plOf(g)
+                    if (dsOf(g) == null) missing++
+                    else if (pl == null || pl.every { it == 0 }) reconstructed++
+                    else computed++
+                }
+            }
+            assert tracking.genotypes.total == total &&
+                   tracking.genotypes.computed == computed &&
+                   tracking.genotypes.reconstructed == reconstructed &&
+                   tracking.genotypes.missing == missing :
+                "tracking counts must match the output VCF; tracking ${tracking.genotypes} vs " +
+                "[total:${total}, computed:${computed}, reconstructed:${reconstructed}, missing:${missing}]"
+            assert tracking.genotypes.passed_through == 0 :
+                "nothing is passed through when the dosages are computed"
+            assert reconstructed > 0 && missing > 0 :
+                "the fixture must reach the reconstruction and the missing branches for this to " +
+                "mean anything; got ${reconstructed} and ${missing}"
+        }
+    }
+
+    test("all-zero and missing PL: reconstructed from GQ above the threshold, missing below") {
+        config "./likelihood.config"
+
+        when {
+            process {
+                """
+                input[0] = [
+                    [ id:'allzero' ],
+                    file("${projectDir}/tests/fixtures/dosage_cases_no_ds.vcf.gz", checkIfExists: true),
+                    file("${projectDir}/modules/local/python/calc_dosage_polarsbio/assets/calc_dosage.py", checkIfExists: true)
+                ]
+                input[1] = 3
+                input[2] = 'calc_dosage'
+                """
+            }
+        }
+
+        then {
+            assert process.success
+            def out = readVcf(process.out.vcf[0][1])
+
+            def r = out.rec['allzero_pl']
+            double p = priorAf(r.info['AC'] as int, r.info['AN'] as int, 0.0d)
+
+            // Below --calc-ds-min-gq (3): nothing to reconstruct from.
+            assert dsOf(r.s['M01']) == null : "all-zero PL with GQ=0 must leave DS missing"
+            assert dsOf(r.s['M02']) == null : "all-zero PL with GQ=2 (< 3) must leave DS missing"
+
+            // At and above the threshold: DS = 2w/(2-p), w = min(10^(-GQ/10), 2/3).
+            [['M03', 3], ['M04', 10], ['M05', 40]].each { sname, gq ->
+                def expected = dosageFromGq(gq, 2, p)
+                def actual = dsOf(r.s[sname])
+                assert actual != null : "all-zero PL with GQ=${gq} must get a reconstructed DS"
+                assert Math.abs(actual - expected) < TOL :
+                    "${sname}: reconstructed DS ${actual} != spec ${expected} (GQ=${gq}, p=${p})"
+            }
+
+            // The reconstruction is monotone in GQ: a more confident hom-ref call gets less dosage.
+            assert dsOf(r.s['M03']) > dsOf(r.s['M04']) && dsOf(r.s['M04']) > dsOf(r.s['M05']) :
+                "reconstructed DS must decrease as GQ rises"
+
+            // The original all-zero PL must be preserved in the output -- the rebuilt values are
+            // used only to compute DS and must never be written back (analysis section 10.4).
+            assert r.s['M04']['PL'] == '0,0,0' :
+                "input PL must be written through unchanged, got ${r.s['M04']['PL']}"
+
+            // Missing PL with GQ present is handled the same way as all-zero PL.
+            def mf = out.rec['missing_fields']
+            double pmf = priorAf(mf.info['AC'] as int, mf.info['AN'] as int, 0.0d)
+            assert Math.abs(dsOf(mf.s['M01']) - dosageFromGq(20, 2, pmf)) < TOL :
+                "missing PL with GQ=20 must be reconstructed like an all-zero PL"
+            assert dsOf(mf.s['M02']) == null :
+                "missing PL and missing GQ leaves nothing to compute from"
+
+            // Haploid all-zero PL: all of w goes to the single alternative genotype.
+            def x = out.rec['x_nonpar_mixed']
+            double px = priorAf(x.info['AC'] as int, x.info['AN'] as int, 0.0d)
+            assert Math.abs(dsOf(x.s['M10']) - dosageFromGq(10, 1, px)) < TOL :
+                "haploid all-zero PL with GQ=10 must reconstruct to w"
+            assert dsOf(x.s['M11']) == null :
+                "haploid all-zero PL with GQ=2 (< 3) must leave DS missing"
+
+            // Masking: GQ or DP missing means the call is not trustworthy.
+            assert mf.s['M03']['GT'] == './.' : "diploid GT must be masked when GQ is missing"
+            assert mf.s['M04']['GT'] == './.' : "diploid GT must be masked when DP is missing"
+        }
+    }
+
+    test("PL with no zero, as a multiallelic split leaves it: dropped at the cut-off, weighted below it") {
+        config "./likelihood.config"
+
+        when {
+            process {
+                """
+                input[0] = [
+                    [ id:'split' ],
+                    file("${projectDir}/tests/fixtures/dosage_cases_no_ds.vcf.gz", checkIfExists: true),
+                    file("${projectDir}/modules/local/python/calc_dosage_polarsbio/assets/calc_dosage.py", checkIfExists: true)
+                ]
+                input[1] = 3
+                input[2] = 'calc_dosage'
+                """
+            }
+        }
+
+        then {
+            assert process.success
+            def out = readVcf(process.out.vcf[0][1])
+            def r = out.rec['split_no_zero_pl']
+
+            // At or above --ds-max-pl-min (30 by default) the sample's own genotype is too far
+            // outside this record to say anything about its ALT, whatever GT was rewritten to.
+            assert dsOf(r.s['M01']) == null :
+                "PL 331,260,247 (min 247) must leave DS missing, got ${dsOf(r.s['M01'])}"
+            assert dsOf(r.s['M02']) == null :
+                "a compound het at min(PL)=60 must be dropped too, got ${dsOf(r.s['M02'])}"
+            assert dsOf(r.s['M03']) == null :
+                "min(PL) exactly at the cut-off must be dropped, got ${dsOf(r.s['M03'])}"
+            assert dsOf(r.s['M04']) != null :
+                "min(PL) one below the cut-off must still be dosed"
+
+            // Below it, the likelihoods keep only the share of the probability mass this record
+            // accounts for, 10^(-min(PL)/10), and GT carries the rest. Read on their own these
+            // likelihoods would put M04 and M05 -- both called 0/0 -- at a dosage near 1.
+            assert dsOf(r.s['M04']) < 0.01 :
+                "min(PL)=29 on a 0/0 call must leave almost no dosage, got ${dsOf(r.s['M04'])}"
+            assert dsOf(r.s['M05']) < 0.05 :
+                "min(PL)=20 on a 0/0 call must leave almost no dosage, got ${dsOf(r.s['M05'])}"
+            assert Math.abs(dsOf(r.s['M06']) - 1.0d) < 0.05 :
+                "a compound het inside the band must be dosed at the one copy its GT carries, " +
+                "got ${dsOf(r.s['M06'])}"
+
+            // Genotypes at the same record whose PL is well formed are untouched by any of this.
+            assert Math.abs(dsOf(r.s['M07']) - 1.0d) < 0.01 :
+                "a confident het with a normal PL must be unaffected, got ${dsOf(r.s['M07'])}"
+            assert dsOf(r.s['M09']) < 0.001 :
+                "a confident hom-ref with a normal PL must be unaffected, got ${dsOf(r.s['M09'])}"
+
+            // The same on chrX, where the minimum has to be taken over two PL values rather than
+            // three. Over three it would always find the padding 0 and exempt every haploid
+            // genotype from the rule.
+            def x = out.rec['x_split_no_zero_pl']
+            assert dsOf(x.s['M01']) == null :
+                "haploid PL 60,40 (min 40) must leave DS missing, got ${dsOf(x.s['M01'])}"
+            assert Math.abs(dsOf(x.s['M02']) - 1.0d) < 0.05 :
+                "haploid carrier inside the band must be dosed at 1, got ${dsOf(x.s['M02'])}"
+            assert dsOf(x.s['M03']) < 0.05 :
+                "haploid non-carrier inside the band must be dosed at 0, got ${dsOf(x.s['M03'])}"
+            assert Math.abs(dsOf(x.s['M04']) - 1.0d) < 0.01 :
+                "a haploid call with a normal PL must be unaffected, got ${dsOf(x.s['M04'])}"
+        }
+    }
+
+    test("--ds-max-pl-min raised: nothing is dropped and the weighting alone sets the dosage") {
+        config "./splitkeep.config"
+
+        when {
+            process {
+                """
+                input[0] = [
+                    [ id:'split_keep' ],
+                    file("${projectDir}/tests/fixtures/dosage_cases_no_ds.vcf.gz", checkIfExists: true),
+                    file("${projectDir}/modules/local/python/calc_dosage_polarsbio/assets/calc_dosage.py", checkIfExists: true)
+                ]
+                input[1] = 3
+                input[2] = 'calc_dosage'
+                """
+            }
+        }
+
+        then {
+            assert process.success
+            def out = readVcf(process.out.vcf[0][1])
+            def r = out.rec['split_no_zero_pl']
+
+            // Same genotypes as the test above, with the cut-off out of the way: they are dosed
+            // now, and at what GT says rather than at what the leftover likelihoods say. Those
+            // likelihoods put the first sample -- called 0/0 -- above 1, which is the whole
+            // reason the weighting exists.
+            assert dsOf(r.s['M01']) != null :
+                "with the cut-off raised, min(PL)=247 must be dosed rather than dropped"
+            assert dsOf(r.s['M01']) < 0.001 :
+                "and dosed at 0, since GT carries no copy, got ${dsOf(r.s['M01'])}"
+            assert Math.abs(dsOf(r.s['M02']) - 1.0d) < 0.001 :
+                "the compound het at min(PL)=60 must be dosed at its one copy, got ${dsOf(r.s['M02'])}"
+            assert dsOf(r.s['M03']) != null :
+                "min(PL) at the old cut-off must be dosed once the cut-off moves"
+            assert dsOf(out.rec['x_split_no_zero_pl'].s['M01']) != null :
+                "the haploid case must follow the same parameter"
+
+            // The cut-off is the only thing that changed: well-formed genotypes are as before.
+            assert Math.abs(dsOf(r.s['M07']) - 1.0d) < 0.01 :
+                "a confident het with a normal PL must be unaffected, got ${dsOf(r.s['M07'])}"
+        }
+    }
+
+    test("DS already in the input header: values passed through untouched, header not duplicated") {
+        config "./likelihood.config"
+
+        when {
+            process {
+                """
+                input[0] = [
+                    [ id:'ds_a' ],
+                    file("${projectDir}/tests/fixtures/dosage_cases_ds_a.vcf.gz", checkIfExists: true),
+                    file("${projectDir}/modules/local/python/calc_dosage_polarsbio/assets/calc_dosage.py", checkIfExists: true)
+                ]
+                input[1] = 3
+                input[2] = 'calc_dosage'
+                """
+            }
+        }
+
+        then {
+            assert process.success
+            def out = readVcf(process.out.vcf[0][1])
+
+            // The input already declares DS, so its own definition is kept and not duplicated.
+            assert out.header.count { it.startsWith('##FORMAT=<ID=DS,') } == 1 :
+                "DS must be declared exactly once when the input already declares it"
+            assert out.header.any { it.startsWith('##FORMAT=<ID=DS,Number=A,') } :
+                "the input's own DS definition (Number=A) must be preserved"
+
+            def r = out.rec['existing_ds']
+
+            // A dosage that flatly disagrees with PL proves no recomputation happened.
+            assert Math.abs(dsOf(r.s['M01']) - 1.75d) < TOL :
+                "an input DS must be passed through even when it disagrees with PL, got ${dsOf(r.s['M01'])}"
+            // Out-of-range input DS is trusted too (decision: if DS is present we trust it).
+            assert Math.abs(dsOf(r.s['M02']) - 2.5d) < TOL :
+                "an out-of-range input DS must be passed through unchanged, got ${dsOf(r.s['M02'])}"
+            // The rule is per file, not per genotype: a genotype whose input DS is missing keeps
+            // a missing DS, even though its PL would give a confident 1.0 (analysis 5.2).
+            assert dsOf(r.s['M03']) == null :
+                "a missing input DS must stay missing, not be filled in from PL, got ${dsOf(r.s['M03'])}"
+
+            // Whole-file check: every genotype that had a DS in the input still has that value.
+            def inp = readVcf(fixture("dosage_cases_ds_a.vcf.gz"))
+            int kept = 0
+            inp.rec.each { vid, ir ->
+                ir.s.each { sname, ig ->
+                    def before = dsOf(ig)
+                    if (before == null) return
+                    def after = dsOf(out.rec[vid].s[sname])
+                    assert after != null && Math.abs(after - before) < TOL :
+                        "${vid}/${sname}: input DS ${before} must survive unchanged, got ${after}"
+                    kept++
+                }
+            }
+            assert kept > 100 : "expected many pre-existing DS values to check, got ${kept}"
+        }
+    }
+
+    test("--force_dosage_recalc overwrites an existing DS") {
+        config "./force.config"
+
+        when {
+            process {
+                """
+                input[0] = [
+                    [ id:'force' ],
+                    file("${projectDir}/tests/fixtures/dosage_cases_ds_a.vcf.gz", checkIfExists: true),
+                    file("${projectDir}/modules/local/python/calc_dosage_polarsbio/assets/calc_dosage.py", checkIfExists: true)
+                ]
+                input[1] = 3
+                input[2] = 'calc_dosage'
+                """
+            }
+        }
+
+        then {
+            assert process.success
+            def out = readVcf(process.out.vcf[0][1])
+            def r = out.rec['existing_ds']
+
+            // M01 carried DS=1.75 against a confident 0/0 PL; recalculation must discard it.
+            assert dsOf(r.s['M01']) < 0.01 :
+                "--force-dosage-recalc must overwrite the input DS 1.75 on a confident 0/0, got ${dsOf(r.s['M01'])}"
+            assert dsOf(r.s['M02']) < 0.01 :
+                "--force-dosage-recalc must overwrite the out-of-range input DS 2.5, got ${dsOf(r.s['M02'])}"
+
+            // and the recomputed values agree with the spec everywhere
+            int checked = specCheckUsablePl(out, 'likelihood', 0.0d)
+            assert checked > 100 : "expected many recomputed genotypes, got ${checked}"
+        }
+    }
+
+    test("DS declared Number=1 is passed through but warned about") {
+        config "./likelihood.config"
+
+        when {
+            process {
+                """
+                input[0] = [
+                    [ id:'ds_1' ],
+                    file("${projectDir}/tests/fixtures/dosage_cases_ds_1.vcf.gz", checkIfExists: true),
+                    file("${projectDir}/modules/local/python/calc_dosage_polarsbio/assets/calc_dosage.py", checkIfExists: true)
+                ]
+                input[1] = 3
+                input[2] = 'calc_dosage'
+                """
+            }
+        }
+
+        then {
+            assert process.success
+            def out = readVcf(process.out.vcf[0][1])
+
+            // bcftools only splits a per-allele FORMAT field correctly when it is declared
+            // Number=A. A Number=1 DS survives a multiallelic split as a copy that is not the
+            // dosage of the individual allele, so the run must say so -- but still trust it.
+            // The warning is read from the tracking file rather than the log, which is where it
+            // is meant to be found.
+            def tracking = readTracking(process.out.tracking_out[0])
+            assert tracking.warnings.any { it.toLowerCase().contains('ds') && it.toLowerCase().contains('number=a') } :
+                "a DS declared Number=1 must produce a warning mentioning Number=A; warnings were:\n" +
+                tracking.warnings.join('\n')
+
+            // Trusting the input means the query never runs, so there is nothing to count.
+            assert tracking.passthrough :
+                "an input that declares FORMAT/DS must be reported as passed through"
+            assert tracking.genotypes.every { name, count -> count == null } :
+                "a passed-through file has no counts to report; got ${tracking.genotypes}"
+
+            assert Math.abs(dsOf(out.rec['existing_ds'].s['M01']) - 1.75d) < TOL :
+                "a Number=1 input DS is still trusted and passed through"
+        }
+    }
+
+    test("--pl-type posterior uses a flat prior, likelihood uses Hardy-Weinberg") {
+        config "./posterior.config"
+
+        when {
+            process {
+                """
+                input[0] = [
+                    [ id:'posterior' ],
+                    file("${projectDir}/tests/fixtures/dosage_cases_no_ds.vcf.gz", checkIfExists: true),
+                    file("${projectDir}/modules/local/python/calc_dosage_polarsbio/assets/calc_dosage.py", checkIfExists: true)
+                ]
+                input[1] = 3
+                input[2] = 'calc_dosage'
+                """
+            }
+        }
+
+        then {
+            assert process.success
+            def out = readVcf(process.out.vcf[0][1])
+
+            int checked = specCheckUsablePl(out, 'posterior', 0.0d)
+            assert checked > 100
+
+            // The two priors must actually differ where it matters: at the singleton record a
+            // weak het carrier keeps most of its dosage under the flat prior and loses it under
+            // HWE. This pins the whole point of analysis section 7.
+            def weakHetFlat = dsOf(out.rec['singleton'].s['M01'])
+            assert weakHetFlat > 0.9d :
+                "under the flat prior a weak het at a singleton keeps ~1 dosage, got ${weakHetFlat}"
+        }
+    }
+
+    test("--ds-prior-min-af floors the allele frequency used in the prior") {
+        config "./minaf02.config"
+
+        when {
+            process {
+                """
+                input[0] = [
+                    [ id:'minaf' ],
+                    file("${projectDir}/tests/fixtures/dosage_cases_no_ds.vcf.gz", checkIfExists: true),
+                    file("${projectDir}/modules/local/python/calc_dosage_polarsbio/assets/calc_dosage.py", checkIfExists: true)
+                ]
+                input[1] = 3
+                input[2] = 'calc_dosage'
+                """
+            }
+        }
+
+        then {
+            assert process.success
+            def out = readVcf(process.out.vcf[0][1])
+
+            // At the singleton record p-hat is ~0.01, far below the 0.2 floor, so the floor is
+            // what the prior must use.
+            def r = out.rec['singleton']
+            assert Math.abs(dsOf(r.s['M01']) - dosageFromPl(plOf(r.s['M01']), 2, 0.2d, 'likelihood')) < TOL :
+                "the prior must use max(p-hat, --ds-prior-min-af)"
+
+            // The floor's purpose: it stops a weak carrier at a rare variant being pulled to 0.
+            // Same genotype, no floor, must come out markedly lower.
+            def pNoFloor = priorAf(r.info['AC'] as int, r.info['AN'] as int, 0.0d)
+            double unfloored = dosageFromPl(plOf(r.s['M01']), 2, pNoFloor, 'likelihood')
+            assert dsOf(r.s['M01']) > unfloored + 0.1d :
+                "flooring the allele frequency must raise the weak carrier's dosage " +
+                "(floored ${dsOf(r.s['M01'])} vs unfloored ${unfloored})"
+        }
+    }
+
+    // =====================================================================================
+    // --pl-type auto: which caller produced the file, and therefore which prior applies.
+    // The three fixtures below share one body and differ only in their header, so any
+    // difference in DS between them is the detection and nothing else.
+    // =====================================================================================
+
+    test("--pl-type auto detects GATK from the FORMAT fingerprint and uses Hardy-Weinberg") {
+        config "./auto.config"
+
+        when {
+            process {
+                """
+                input[0] = [
+                    [ id:'auto_gatk' ],
+                    file("${projectDir}/tests/fixtures/dosage_cases_caller_gatk.vcf.gz", checkIfExists: true),
+                    file("${projectDir}/modules/local/python/calc_dosage_polarsbio/assets/calc_dosage.py", checkIfExists: true)
+                ]
+                input[1] = 3
+                input[2] = 'calc_dosage'
+                """
+            }
+        }
+
+        then {
+            assert process.success
+            def out = readVcf(process.out.vcf[0][1])
+            def log = taskStdout(process.out.vcf[0][1])
+
+            // The header names no caller, which is the case that matters: the pipeline's own
+            // reference data has no ##source line either, and treating it as DeepVariant would
+            // leave GATK likelihoods under a flat prior.
+            assert log.any { it.contains('GATK-specific FORMAT field') } :
+                "detection must report which FORMAT fields identified GATK; stdout was:\n" + log.join('\n')
+            assert !log.any { it.startsWith('WARNING: --pl-type auto could not identify') } :
+                "a fingerprinted header must not fall back to the default assumption"
+
+            assert specCheckUsablePl(out, 'likelihood', 0.0d) > 100
+        }
+    }
+
+    test("--pl-type auto detects DeepVariant from the FORMAT fingerprint and uses a flat prior") {
+        config "./auto.config"
+
+        when {
+            process {
+                """
+                input[0] = [
+                    [ id:'auto_dv' ],
+                    file("${projectDir}/tests/fixtures/dosage_cases_caller_deepvariant.vcf.gz", checkIfExists: true),
+                    file("${projectDir}/modules/local/python/calc_dosage_polarsbio/assets/calc_dosage.py", checkIfExists: true)
+                ]
+                input[1] = 3
+                input[2] = 'calc_dosage'
+                """
+            }
+        }
+
+        then {
+            assert process.success
+            def out = readVcf(process.out.vcf[0][1])
+            def log = taskStdout(process.out.vcf[0][1])
+
+            assert log.any { it.contains('DeepVariant-specific FORMAT field') } :
+                "detection must report which FORMAT fields identified DeepVariant; stdout was:\n" + log.join('\n')
+
+            assert specCheckUsablePl(out, 'posterior', 0.0d) > 100
+            // The detection must actually change the answer, not just the log line.
+            assert dsOf(out.rec['singleton'].s['M01']) > 0.9d :
+                "under the detected flat prior a weak het at a singleton keeps ~1 dosage"
+        }
+    }
+
+    test("--pl-type auto on real DeepVariant output: flat prior, from its own header") {
+        config "./auto.config"
+
+        when {
+            process {
+                """
+                input[0] = [
+                    [ id:'auto_dv_real' ],
+                    file("${projectDir}/tests/fixtures/deepvariant_real_2samples.vcf.gz", checkIfExists: true),
+                    file("${projectDir}/modules/local/python/calc_dosage_polarsbio/assets/calc_dosage.py", checkIfExists: true)
+                ]
+                input[1] = 3
+                input[2] = 'calc_dosage'
+                """
+            }
+        }
+
+        then {
+            assert process.success
+            def out = readVcf(process.out.vcf[0][1])
+            def log = taskStdout(process.out.vcf[0][1])
+
+            // The other detection tests run on headers written for them. This one is a real
+            // DeepVariant header: no ##source line, and MIN_DP declared alongside VAF and
+            // MED_DP, which is why MIN_DP cannot be part of the GATK fingerprint.
+            assert log.any { it.contains('DeepVariant-specific FORMAT field') } :
+                "a real DeepVariant header must be fingerprinted as DeepVariant; stdout was:\n" + log.join('\n')
+
+            int checked = specCheckUsablePl(out, 'posterior', 0.0d)
+            assert checked >= 10 : "expected the file's genotypes to be spec-checked, got ${checked}"
+
+            // The prior actually decides here: this hom-ref call has no alternative allele in
+            // the cohort, so Hardy-Weinberg would push its dosage an order of magnitude lower
+            // than the caller's own posterior does.
+            def refCall = out.atPos['chr22:1982'].s['testN']
+            assert dsOf(refCall) > 0.005d :
+                "PL 0,23,27 normalised flat gives DS ~ 0.0089, got ${dsOf(refCall)}"
+        }
+    }
+
+    test("--pl-type auto assumes GATK-like and warns when the header identifies no caller") {
+        config "./auto.config"
+
+        when {
+            process {
+                """
+                input[0] = [
+                    [ id:'auto_none' ],
+                    file("${projectDir}/tests/fixtures/dosage_cases_no_ds.vcf.gz", checkIfExists: true),
+                    file("${projectDir}/modules/local/python/calc_dosage_polarsbio/assets/calc_dosage.py", checkIfExists: true)
+                ]
+                input[1] = 3
+                input[2] = 'calc_dosage'
+                """
+            }
+        }
+
+        then {
+            assert process.success
+            def out = readVcf(process.out.vcf[0][1])
+            def log = taskStdout(process.out.vcf[0][1])
+
+            // PL as pure likelihoods is what the VCF specification defines, so it is what an
+            // unidentified file is assumed to hold -- loudly, because the prior is the single
+            // largest influence on the dosages.
+            assert log.any { it.startsWith('WARNING: --pl-type auto could not identify') } :
+                "the fallback must warn; stdout was:\n" + log.join('\n')
+            assert specCheckUsablePl(out, 'likelihood', 0.0d) > 100
+        }
+    }
+
+    test("--variant-caller overrides what the header fingerprint would have said") {
+        config "./caller_dv.config"
+
+        when {
+            process {
+                """
+                input[0] = [
+                    [ id:'named_caller' ],
+                    file("${projectDir}/tests/fixtures/dosage_cases_caller_gatk.vcf.gz", checkIfExists: true),
+                    file("${projectDir}/modules/local/python/calc_dosage_polarsbio/assets/calc_dosage.py", checkIfExists: true)
+                ]
+                input[1] = 3
+                input[2] = 'calc_dosage'
+                """
+            }
+        }
+
+        then {
+            assert process.success
+            def out = readVcf(process.out.vcf[0][1])
+
+            // GATK FORMAT fields in the header, DeepVariant named on the command line: the
+            // explicit statement wins and nothing is inspected.
+            assert specCheckUsablePl(out, 'posterior', 0.0d) > 100
+        }
+    }
+
+    // The only test with no config of its own: it runs on the pipeline's real defaults, so it
+    // is what catches conf/modules.config failing to pass an option through. Every other test
+    // here overrides ext.args and would pass even if that wiring were missing entirely.
+    test("the pipeline's default options reach the script") {
+
+        when {
+            process {
+                """
+                input[0] = [
+                    [ id:'defaults' ],
+                    file("${projectDir}/tests/fixtures/dosage_cases_caller_gatk.vcf.gz", checkIfExists: true),
+                    file("${projectDir}/modules/local/python/calc_dosage_polarsbio/assets/calc_dosage.py", checkIfExists: true)
+                ]
+                input[1] = 3
+                input[2] = 'calc_dosage'
+                """
+            }
+        }
+
+        then {
+            assert process.success
+            def cmd = taskCommand(process.out.vcf[0][1])
+
+            assert cmd.contains('--pl-type auto') :
+                "conf/modules.config must pass params.pl_type; command was:\n${cmd}"
+            assert cmd.contains('--ds-prior-min-af 0') :
+                "conf/modules.config must pass params.ds_prior_min_af; command was:\n${cmd}"
+            assert cmd.contains("--ds-max-pl-min ${SPLIT_PL_CUTOFF}") :
+                "conf/modules.config must pass params.ds_max_pl_min; command was:\n${cmd}"
+            // Both of these are off by default and must be absent, not passed empty: an empty
+            // --variant-caller would be a name the script does not know, and --force-dosage-recalc
+            // takes no value at all.
+            assert !cmd.contains('--variant-caller') :
+                "an empty params.variant_caller must not reach the command line"
+            assert !cmd.contains('--force-dosage-recalc') :
+                "params.force_dosage_recalc is false by default and must not reach the command line"
+
+            // Defaults end to end: auto resolves to the GATK fingerprint, so Hardy-Weinberg.
+            assert specCheckUsablePl(readVcf(process.out.vcf[0][1]), 'likelihood', 0.0d) > 100
+        }
+    }
+}

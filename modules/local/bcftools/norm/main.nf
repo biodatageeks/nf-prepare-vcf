@@ -22,21 +22,29 @@ process BCFTOOLS_NORM {
     task.ext.when == null || task.ext.when
 
     script:
-    def args = task.ext.args ?: '--output-type z'
+    // args -> bcftools norm, args2 -> the +fill-tags it is piped into, which writes the output.
+    def args = task.ext.args ?: ''
+    def args2 = task.ext.args2 ?: '--output-type z'
     def prefix = task.ext.prefix ?: "${meta.id}"
-    def extension = args.contains("--output-type b") || args.contains("-Ob") ? "bcf.gz" :
-                    args.contains("--output-type u") || args.contains("-Ou") ? "bcf" :
-                    args.contains("--output-type z") || args.contains("-Oz") ? "vcf.gz" :
-                    args.contains("--output-type v") || args.contains("-Ov") ? "vcf" :
+    def extension = args2.contains("--output-type b") || args2.contains("-Ob") ? "bcf.gz" :
+                    args2.contains("--output-type u") || args2.contains("-Ou") ? "bcf" :
+                    args2.contains("--output-type z") || args2.contains("-Oz") ? "vcf.gz" :
+                    args2.contains("--output-type v") || args2.contains("-Ov") ? "vcf" :
                     "vcf.gz"
 
     """
+    # AC/AN are recounted from the split records, for the dosage step. Piped to avoid a second
+    # pass over the file; -Ou is the cheap handover format, so the threads go to the writing end.
     bcftools norm \\
         --fasta-ref ${fasta} \\
-        --output ${prefix}_${out_name_part}.${extension} \\
         $args \\
+        --output-type u \\
+        ${vcf} \\
+      | bcftools +fill-tags \\
+        $args2 \\
         --threads $task.cpus \\
-        ${vcf}
+        --output ${prefix}_${out_name_part}.${extension} \\
+        -- --tags AC,AN
 
 
 
@@ -80,7 +88,7 @@ process BCFTOOLS_NORM {
             "variants": \$variants_out,
             "samples": \$samples_out
         },
-        "parameters": "$args",
+        "parameters": "$args | +fill-tags $args2 -- --tags AC,AN",
         "predecessor": "\$predecessor"
     }
     END_TRACKING_JSON
@@ -93,16 +101,17 @@ process BCFTOOLS_NORM {
     """
 
     stub:
-    def args = task.ext.args ?: '--output-type z'
+    // The output type and index come from args2: the +fill-tags end of the pipe writes the file.
+    def args2 = task.ext.args2 ?: '--output-type z'
     def prefix = task.ext.prefix ?: "${meta.id}"
-    def extension = args.contains("--output-type b") || args.contains("-Ob") ? "bcf.gz" :
-                    args.contains("--output-type u") || args.contains("-Ou") ? "bcf" :
-                    args.contains("--output-type z") || args.contains("-Oz") ? "vcf.gz" :
-                    args.contains("--output-type v") || args.contains("-Ov") ? "vcf" :
+    def extension = args2.contains("--output-type b") || args2.contains("-Ob") ? "bcf.gz" :
+                    args2.contains("--output-type u") || args2.contains("-Ou") ? "bcf" :
+                    args2.contains("--output-type z") || args2.contains("-Oz") ? "vcf.gz" :
+                    args2.contains("--output-type v") || args2.contains("-Ov") ? "vcf" :
                     "vcf.gz"
-    def index = args.contains("--write-index=tbi") || args.contains("-W=tbi") ? "tbi" :
-                args.contains("--write-index=csi") || args.contains("-W=csi") ? "csi" :
-                args.contains("--write-index") || args.contains("-W") ? "csi" :
+    def index = args2.contains("--write-index=tbi") || args2.contains("-W=tbi") ? "tbi" :
+                args2.contains("--write-index=csi") || args2.contains("-W=csi") ? "csi" :
+                args2.contains("--write-index") || args2.contains("-W") ? "csi" :
                 ""
     def create_cmd = extension.endsWith(".gz") ? "echo '' | gzip >" : "touch"
     def create_index = extension.endsWith(".gz") && index.matches("csi|tbi") ? "touch ${prefix}.${extension}.${index}" : ""

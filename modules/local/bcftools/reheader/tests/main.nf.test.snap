@@ -8,7 +8,7 @@
                             "id": "test",
                             "single_end": false
                         },
-                        "test_reheader.vcf.gz:md5,f098373a7c94532bb1864c6a931592de"
+                        "test_reheader.vcf.gz:md5,4f86d728dd876ab69dec0d1f3e543077"
                     ]
                 ],
                 "1": [
@@ -20,7 +20,7 @@
                             "id": "test",
                             "single_end": false
                         },
-                        "test_reheader.vcf.gz:md5,f098373a7c94532bb1864c6a931592de"
+                        "test_reheader.vcf.gz:md5,4f86d728dd876ab69dec0d1f3e543077"
                     ]
                 ],
                 "versions": [
@@ -28,10 +28,10 @@
                 ]
             }
         ],
+        "timestamp": "2026-09-17T20:07:21.142390577",
         "meta": {
-            "nf-test": "0.9.3",
-            "nextflow": "25.10.2"
-        },
-        "timestamp": "2026-09-03T22:37:22.116618545"
+            "nf-test": "0.9.5",
+            "nextflow": "26.04.6"
+        }
     }
 }

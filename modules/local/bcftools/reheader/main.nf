@@ -38,7 +38,23 @@ process BCFTOOLS_REHEADER {
         mv header_without_last_line_tmp.txt header_without_last_line.txt
     fi
 
-    echo '${header_lines_to_add}' > header_lines_to_add.txt
+    # Add only what the original header does not declare already: an ID may be defined once, and
+    # CALC_DOSAGE_POLARSBIO passes an input FORMAT/DS definition through rather than replacing it.
+    : > header_lines_to_add.txt
+    while IFS= read -r line; do
+        if [ -z "\$line" ]; then
+            continue
+        fi
+        declared=\$(printf '%s' "\$line" | sed -n 's/^\\(##[A-Za-z]*=<ID=[^,]*,\\).*/\\1/p')
+        # index(...) == 1 is a fixed-string match anchored at the start, so an ID quoted inside
+        # some other line's Description cannot pass for a declaration.
+        if [ -n "\$declared" ] && awk -v d="\$declared" 'index(\$0, d) == 1 { found = 1 } END { exit !found }' header.txt; then
+            echo "Original header already declares \${declared}...> - not adding it a second time"
+        else
+            printf '%s\\n' "\$line" >> header_lines_to_add.txt
+        fi
+    done <<< '${header_lines_to_add}'
+
     cat header_without_last_line.txt header_lines_to_add.txt header_last_line.txt > header_final.txt
 
     bcftools reheader \\

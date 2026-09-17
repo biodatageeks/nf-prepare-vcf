@@ -125,10 +125,14 @@ workflow NF_PREPARE_VCF {
     )
     ch_with_dosage_vcf = CALC_DOSAGE_POLARSBIO.out.vcf
     ch_versions = ch_versions.mix(CALC_DOSAGE_POLARSBIO.out.versions.first())
+    ch_tracking = ch_tracking.mix(CALC_DOSAGE_POLARSBIO.out.tracking_out.first())
 
 
+    // there's a bug in polars-bio and the DS header line is not added - below is a workaround for this
     BCFTOOLS_REHEADER (
         ch_vep_vcf.join(ch_with_dosage_vcf, by: 0),
+        // Number=1: BCFTOOLS_NORM has already split multiallelic records, so every record here
+        // has exactly one ALT allele and one dosage per genotype.
         Channel.value("##FORMAT=<ID=DS,Number=1,Type=Float,Description=\"Genotype dosage (expected number of non-reference alleles)\">"),
         Channel.value("reheader")
     )
