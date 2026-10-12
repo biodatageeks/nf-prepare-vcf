@@ -3,7 +3,7 @@ process CALC_DOSAGE_POLARSBIO {
     tag "$meta.id"
     label 'process_1'
 
-    container 'docker.io/psuszynski/python_tools:1.0.11'
+    container 'docker.io/psuszynski/python_tools:1.0.12'
 
     input:
     tuple val(meta), path(vcf_file), path(python_script)

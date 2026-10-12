@@ -4,7 +4,7 @@ process COMPUTE_GENE_RANGES {
     label 'process_single'
 
     conda "${moduleDir}/environment.yml"
-    container 'docker.io/psuszynski/python_tools:1.0.8'
+    container 'docker.io/psuszynski/python_tools:1.0.12'
 
     input:
     tuple val(meta), path(vcf_file), path(script_path)
