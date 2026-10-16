@@ -1,7 +1,7 @@
 process CALC_DOSAGE_POLARSBIO {
 
     tag "$meta.id"
-    label 'process_1'
+    label 'process_medium'
 
     container "${ params.cpu_support_avx2 ? 'docker.io/psuszynski/python_tools:1.0.13' : 'docker.io/psuszynski/python_tools:1.0.13.noavx2' }"
 
