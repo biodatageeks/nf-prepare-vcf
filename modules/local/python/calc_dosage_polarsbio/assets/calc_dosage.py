@@ -80,9 +80,7 @@ missing.
 
 import argparse
 import gzip
-import json
 import shutil
-from pathlib import Path
 import polars as pl
 import polars_bio as pb
 
@@ -157,70 +155,13 @@ parser.add_argument(
         "overwriting the input values."
     ),
 )
-parser.add_argument(
-    "--tracking-json-path",
-    default="",
-    help="Where to write the tracking JSON: how many genotypes ended up in each case, and any "
-         "warning raised. Empty (the default) writes none.",
-)
-parser.add_argument(
-    "--process-name",
-    default="CALC_DOSAGE_POLARSBIO",
-    help="Name recorded in the tracking JSON, so it reads like the other steps' tracking files.",
-)
-parser.add_argument("--workflow-name", default="", help="Workflow recorded in the tracking JSON.")
 
 args = parser.parse_args()
 
-warnings: list[str] = []
-
-# What became of each genotype. "passed_through" is only ever non-zero when the input's own
-# dosages are kept, and then nothing is counted at all, so it is there for the shape, not for a
-# value; "reconstructed" is the GQ branch, for a hom-ref call whose PL says nothing.
-GENOTYPE_COUNTS = ["total", "passed_through", "computed", "reconstructed", "missing"]
-
 
 def warn(message: str) -> None:
-    """Warnings go to the tracking file as well as the log, so a test can read them from there."""
-    warnings.append(message)
     print(f"WARNING: {message}")
 
-
-def write_tracking(passthrough: bool) -> None:
-    """The counts of what happened to each genotype, in the shape BCFTOOLS_NORM's tracking uses.
-
-    Reporting is not worth failing a run for: by the time this is called the output VCF is
-    written, so anything that goes wrong here is logged and swallowed.
-    """
-    if not args.tracking_json_path:
-        return
-    try:
-        # In passthrough mode the input's own dosages were kept, the query never ran, and there
-        # is nothing to count: counting would mean a pass over the file for nothing.
-        counts = dict.fromkeys(GENOTYPE_COUNTS, None)
-        if not passthrough:
-            counted = pb.sql(COUNTS_SQL).collect().to_dicts()[0]
-            counts = {name: int(counted[name]) for name in GENOTYPE_COUNTS}
-            print(f"Genotypes: {counts}")
-        Path(args.tracking_json_path).write_text(json.dumps({
-            "process_name": args.process_name,
-            "workflow_name": args.workflow_name,
-            "parameters": (
-                f"--calc-ds-min-gq {args.calc_ds_min_gq} --pl-type {args.pl_type} "
-                f"--ds-prior-min-af {args.ds_prior_min_af} --ds-max-pl-min {args.ds_max_pl_min}"
-                + (f" --variant-caller {args.variant_caller}" if args.variant_caller else "")
-                + (" --force-dosage-recalc" if args.force_dosage_recalc else "")
-            ),
-            "passthrough": passthrough,
-            "genotypes": counts,
-            "warnings": warnings,
-        }, indent=2) + "\n")
-        print(f"Wrote: {args.tracking_json_path}")
-    except Exception as failure:
-        print(
-            f"WARNING: could not write the tracking file {args.tracking_json_path}: {failure!r}. "
-            "The dosages themselves are unaffected."
-        )
 
 if not 0.0 <= args.ds_prior_min_af < 1.0:
     parser.error(f"--ds-prior-min-af must lie in [0, 1), got {args.ds_prior_min_af}")
@@ -254,7 +195,6 @@ if input_ds is not None and not args.force_dosage_recalc:
     )
     shutil.copyfile(args.input_vcf_path, args.output_vcf_path)
     print(f"Wrote: {args.output_vcf_path}")
-    write_tracking(passthrough=True)
     raise SystemExit(0)
 
 if input_ds is not None:
@@ -520,19 +460,6 @@ SELECT {select_passthrough_sql},
 FROM indexed i join genotypes_aggregated g ON i.variant_idx = g.variant_idx
 """
 
-# The tracking counts, over the same CTEs. This is a second pass over the input rather than a
-# by-product of the first: the query above has to end in the genotypes struct that sink_vcf
-# writes, and nothing can be aggregated out of it on the way.
-COUNTS_SQL = DS_CTES_SQL + """
-SELECT
-  COUNT(*) AS total,
-  0 AS passed_through,
-  COUNT(*) FILTER (WHERE ds IS NOT NULL AND NOT pl_uninformative) AS computed,
-  COUNT(*) FILTER (WHERE ds IS NOT NULL AND pl_uninformative) AS reconstructed,
-  COUNT(*) FILTER (WHERE ds IS NULL) AS missing
-FROM ds_calc
-"""
-
 
 lf = pb.sql("EXPLAIN select * FROM (" + FILTER_SQL + ")")
 
@@ -581,5 +508,3 @@ pb.set_source_metadata(lf, format="vcf", path=args.input_vcf_path, header=header
 
 pb.sink_vcf(lf, args.output_vcf_path)
 print(f"Wrote: {args.output_vcf_path}")
-
-write_tracking(passthrough=False)

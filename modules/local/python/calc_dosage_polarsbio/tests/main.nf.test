@@ -93,8 +93,10 @@ nextflow_process {
             records[c[2]] = record
             byPos["${c[0]}:${c[1]}".toString()] = record
         }
+        // Counted from the lines, not from the maps above: two records can share a position.
         return [header: lines.findAll { it.startsWith('##') }, samples: samples,
-                rec: records, atPos: byPos]
+                rec: records, atPos: byPos,
+                nRecords: lines.count { it && !it.startsWith('#') }]
     }
 
     def plOf = { Map g ->
@@ -116,10 +118,6 @@ nextflow_process {
 
     def taskCommand = { String anyOutputPath ->
         new File(new File(anyOutputPath).parentFile, '.command.sh').text
-    }
-
-    def readTracking = { String trackingPath ->
-        new groovy.json.JsonSlurper().parseText(new File(trackingPath).text)
     }
 
     // `projectDir` is a Nextflow variable: it resolves inside the triple-quoted process blocks
@@ -238,33 +236,14 @@ nextflow_process {
             assert dsOf(out.rec['x_bad_pl_len'].s['M01']) == null :
                 "haploid GT with 3 PL values must leave DS missing"
 
-            // ---- the tracking file counts what the output actually contains -------------
-            // Recounted from the written VCF, which is the only independent check there is:
-            // the counts come from the same query as the dosages, so they can only be wrong
-            // together with it or not at all.
-            def tracking = readTracking(process.out.tracking_out[0])
-            assert !tracking.passthrough : "a computed file must not be reported as passed through"
-            int total = 0, reconstructed = 0, computed = 0, missing = 0
-            out.atPos.each { rname, r ->
-                r.s.each { sname, g ->
-                    total++
-                    def pl = plOf(g)
-                    if (dsOf(g) == null) missing++
-                    else if (pl == null || pl.every { it == 0 }) reconstructed++
-                    else computed++
-                }
-            }
-            assert tracking.genotypes.total == total &&
-                   tracking.genotypes.computed == computed &&
-                   tracking.genotypes.reconstructed == reconstructed &&
-                   tracking.genotypes.missing == missing :
-                "tracking counts must match the output VCF; tracking ${tracking.genotypes} vs " +
-                "[total:${total}, computed:${computed}, reconstructed:${reconstructed}, missing:${missing}]"
-            assert tracking.genotypes.passed_through == 0 :
-                "nothing is passed through when the dosages are computed"
-            assert reconstructed > 0 && missing > 0 :
-                "the fixture must reach the reconstruction and the missing branches for this to " +
-                "mean anything; got ${reconstructed} and ${missing}"
+            // ---- no record or sample is dropped ------------------------------------------
+            // Computing DS adds a FORMAT field and nothing else, which is why this step needs no
+            // tracking file of its own.
+            def inp = readVcf(fixture("dosage_cases_no_ds.vcf.gz"))
+            assert out.nRecords == inp.nRecords :
+                "computing dosages must not drop records; ${inp.nRecords} in, ${out.nRecords} out"
+            assert out.samples == inp.samples :
+                "computing dosages must keep the samples and their order"
         }
     }
 
@@ -559,18 +538,11 @@ nextflow_process {
             // bcftools only splits a per-allele FORMAT field correctly when it is declared
             // Number=A. A Number=1 DS survives a multiallelic split as a copy that is not the
             // dosage of the individual allele, so the run must say so -- but still trust it.
-            // The warning is read from the tracking file rather than the log, which is where it
-            // is meant to be found.
-            def tracking = readTracking(process.out.tracking_out[0])
-            assert tracking.warnings.any { it.toLowerCase().contains('ds') && it.toLowerCase().contains('number=a') } :
-                "a DS declared Number=1 must produce a warning mentioning Number=A; warnings were:\n" +
-                tracking.warnings.join('\n')
-
-            // Trusting the input means the query never runs, so there is nothing to count.
-            assert tracking.passthrough :
-                "an input that declares FORMAT/DS must be reported as passed through"
-            assert tracking.genotypes.every { name, count -> count == null } :
-                "a passed-through file has no counts to report; got ${tracking.genotypes}"
+            def log = taskStdout(process.out.vcf[0][1])
+            def warnings = log.findAll { it.startsWith('WARNING: ') }
+            assert warnings.any { it.toLowerCase().contains('ds') && it.toLowerCase().contains('number=a') } :
+                "a DS declared Number=1 must produce a warning mentioning Number=A; stdout was:\n" +
+                log.join('\n')
 
             assert Math.abs(dsOf(out.rec['existing_ds'].s['M01']) - 1.75d) < TOL :
                 "a Number=1 input DS is still trusted and passed through"
